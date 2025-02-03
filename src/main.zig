@@ -1,21 +1,40 @@
 const std = @import("std");
+
+const IPv4 = @import("ip.zig");
 const Tap = @import("tap.zig");
+const Arp = @import("arp.zig");
 const Ethernet = @import("ethernet.zig");
 
 pub fn main() !void {
-    var dev = try Tap.Device.init(null);
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    const allocator = gpa.allocator();
+
+    var dev = try Tap.Device.init(allocator, null);
     defer dev.deinit();
+    try dev.ifup("AA:AA:AA:AA:AA:AA", "10.0.0.4");
 
-    try dev.ifup("", "");
+    var eth = Ethernet.init(allocator, &dev);
+    defer eth.deinit();
 
-    std.debug.print("Interface: {s}\n", .{dev.name});
+    var arp = Arp.init(allocator, &eth);
+    defer arp.deinit();
 
-    const eth = Ethernet.Header{
-        .dmac = [_]u8{'A'} ** 6,
-        .smac = [_]u8{'B'} ** 6,
-        .type = 67,
-        .data = undefined,
-    };
-    const stdout = std.io.getStdOut().writer();
-    _ = try stdout.writeStructEndian(eth, .big);
+    var ip = IPv4.init(allocator, &arp, &eth);
+    defer ip.deinit();
+
+    try eth.addProtocolHandler(
+        .arp,
+        arp.handler(),
+    );
+
+    try eth.addProtocolHandler(
+        .ip4,
+        ip.handler(),
+    );
+
+    try ip.send(null, 0x0100000a, .IPPROTO_IP, "hello");
+
+    while (true) {
+        try eth.readAndDispatch();
+    }
 }
