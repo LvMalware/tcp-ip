@@ -7,9 +7,9 @@ const Ethernet = @import("ethernet.zig");
 const Self = @This();
 
 const Proto = enum(u8) {
-    IPPROTO_IP = 0,
-    IPPROTO_ICMP = 1,
-    IPPROTO_TCP = 6,
+    IP = 0,
+    ICMP = 1,
+    TCP = 6,
     // ... other protocols
     pub fn fromInt(val: u8) !Proto {
         return try std.meta.intToEnum(Proto, val);
@@ -119,7 +119,7 @@ pub fn deinit(self: *Self) void {
     self.handlers.deinit();
 }
 
-pub fn addProtocolHandler(self: *Self, proto: Proto, h: *Handler) !void {
+pub fn addProtocolHandler(self: *Self, proto: Proto, h: Handler) !void {
     try self.handlers.put(proto, h);
 }
 
@@ -131,8 +131,8 @@ pub fn send(self: *Self, src: ?u32, dst: u32, proto: Proto, data: []const u8) !v
         .len = @truncate(@sizeOf(Header) + data.len),
         .csum = 0,
         .frag = 0x4000,
-        .saddr = if (src) |addr| addr else self.ethernet.dev.ipaddr,
-        .daddr = dst,
+        .saddr = 0,
+        .daddr = 0,
         .proto = @intFromEnum(proto),
         .ver_ihl = 0,
     };
@@ -142,6 +142,10 @@ pub fn send(self: *Self, src: ?u32, dst: u32, proto: Proto, data: []const u8) !v
     if (native_endian != .big) {
         std.mem.byteSwapAllFields(Header, &header);
     }
+
+    // both saddr and daddr should be given in network byte-order
+    header.saddr = if (src) |addr| addr else self.ethernet.dev.ipaddr;
+    header.daddr = dst;
 
     header.csum = header.checksum();
 
@@ -168,16 +172,14 @@ pub fn handle(self: *Self, frame: *const Ethernet.Frame) void {
         .data = header.data(&frame.data),
     };
 
-    if (self.handlers.get(proto)) |*h| {
-        h.handle(&packet);
-    }
-
-    std.debug.print("[IPv{d}] packet of {d} (IHL={d}) bytes from {d} to {d}\n", .{
+    std.debug.print("[IPv{d}] packet of {d} bytes from {d} to {d}\n", .{
         packet.header.version(),
         packet.header.len,
-        packet.header.ihl(),
         packet.header.saddr,
         packet.header.daddr,
     });
-    _ = .{ self, frame };
+
+    if (self.handlers.get(proto)) |*h| {
+        h.handle(&packet);
+    }
 }

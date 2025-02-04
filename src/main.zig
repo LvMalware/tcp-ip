@@ -1,8 +1,10 @@
 const std = @import("std");
 
-const IPv4 = @import("ip.zig");
 const Tap = @import("tap.zig");
+const TCP = @import("tcp.zig");
 const Arp = @import("arp.zig");
+const IPv4 = @import("ipv4.zig");
+const ICMP4 = @import("icmp4.zig");
 const Ethernet = @import("ethernet.zig");
 
 pub fn main() !void {
@@ -22,17 +24,18 @@ pub fn main() !void {
     var ip = IPv4.init(allocator, &arp, &eth);
     defer ip.deinit();
 
-    try eth.addProtocolHandler(
-        .arp,
-        arp.handler(),
-    );
+    var tcp = TCP.init(allocator, &ip);
+    defer tcp.deinit();
 
-    try eth.addProtocolHandler(
-        .ip4,
-        ip.handler(),
-    );
+    var icmp = ICMP4.init(allocator, &ip);
+    defer icmp.deinit();
 
-    try ip.send(null, 0x0100000a, .IPPROTO_IP, "hello");
+    try eth.addProtocolHandler(.ip4, ip.handler());
+    try eth.addProtocolHandler(.arp, arp.handler());
+    try ip.addProtocolHandler(.ICMP, icmp.handler());
+    try ip.addProtocolHandler(.TCP, tcp.handler());
+
+    // try ip.send(null, 0x0100000a, .IP, "hello");
 
     while (true) {
         try eth.readAndDispatch();
