@@ -49,7 +49,7 @@ const Header = extern struct {
     opcode: u16 align(1),
 };
 
-const IPv4 = extern struct {
+const ARPIPv4 = extern struct {
     smac: [6]u8 align(1),
     saddr: u32 align(1),
     dmac: [6]u8 align(1),
@@ -114,7 +114,7 @@ fn macfmt(m: [6]u8) [17]u8 {
     return buf;
 }
 
-fn merge(self: *Self, packet: *const Header, arp: *const IPv4) bool {
+fn merge(self: *Self, packet: *const Header, arp: *const ARPIPv4) bool {
     const hwtype = HWType.fromInt(packet.hwtype) catch unreachable;
     for (self.cache.items) |*cached| {
         if (cached.hwtype == hwtype and arp.saddr == cached.saddr) {
@@ -125,7 +125,7 @@ fn merge(self: *Self, packet: *const Header, arp: *const IPv4) bool {
     return false;
 }
 
-pub fn insertEntry(self: *Self, packet: *const Header, arp: *const IPv4) void {
+pub fn insertEntry(self: *Self, packet: *const Header, arp: *const ARPIPv4) void {
     var entry: Cached = .{
         .smac = undefined,
         .state = .resolved,
@@ -145,11 +145,12 @@ pub fn request(self: Self, addr: u32) !void {
         .opcode = @intFromEnum(Opcode.arp_request),
     };
 
+    // TODO: maybe not change endianess?
     if (native_endian != .big) {
         std.mem.byteSwapAllFields(Header, &header);
     }
 
-    const ipv4: IPv4 = .{
+    const ipv4: ARPIPv4 = .{
         .smac = self.ethernet.dev.hwaddr,
         .saddr = self.ethernet.dev.ipaddr,
         .dmac = std.mem.zeroes([6]u8),
@@ -161,7 +162,7 @@ pub fn request(self: Self, addr: u32) !void {
         ipv4fmt(ipv4.saddr),
     });
 
-    const buffer = try self.allocator.alloc(u8, @sizeOf(Header) + @sizeOf(IPv4));
+    const buffer = try self.allocator.alloc(u8, @sizeOf(Header) + @sizeOf(ARPIPv4));
     defer self.allocator.free(buffer);
 
     std.mem.copyForwards(u8, buffer[0..], &std.mem.toBytes(header));
@@ -208,7 +209,7 @@ pub fn resolveWait(self: *Self, addr: u32) ![6]u8 {
     return error.Unknown;
 }
 
-pub fn reply(self: Self, packet: *const Header, arp: *const IPv4) !void {
+pub fn reply(self: Self, packet: *const Header, arp: *const ARPIPv4) !void {
     var header: Header = .{
         .hwtype = packet.hwtype,
         .proto = packet.proto,
@@ -223,11 +224,12 @@ pub fn reply(self: Self, packet: *const Header, arp: *const IPv4) !void {
     std.mem.copyForwards(u8, ipv4.dmac[0..], arp.smac[0..]);
     std.mem.copyForwards(u8, ipv4.smac[0..], self.ethernet.dev.hwaddr[0..]);
 
+    // TODO: maybe not change endianess?
     if (native_endian != .big) {
         std.mem.byteSwapAllFields(Header, &header);
     }
 
-    const buffer = try self.allocator.alloc(u8, @sizeOf(Header) + @sizeOf(IPv4));
+    const buffer = try self.allocator.alloc(u8, @sizeOf(Header) + @sizeOf(ARPIPv4));
     defer self.allocator.free(buffer);
 
     std.mem.copyForwards(u8, buffer[0..], &std.mem.toBytes(header));
@@ -242,6 +244,7 @@ pub fn reply(self: Self, packet: *const Header, arp: *const IPv4) !void {
 pub fn handle(self: *Self, frame: *const Ethernet.Frame) void {
     var packet = std.mem.bytesToValue(Header, frame.data[0..]);
 
+    // TODO: maybe not change endianess?
     if (native_endian != .big) {
         std.mem.byteSwapAllFields(Header, &packet);
     }
@@ -259,8 +262,8 @@ pub fn handle(self: *Self, frame: *const Ethernet.Frame) void {
             // we must ensure this is the right protocol before doing this,
             // otherwise we might risk undefined behavior.
             const ipv4 = std.mem.bytesToValue(
-                IPv4,
-                frame.data[@sizeOf(Header)..][0..@sizeOf(IPv4)],
+                ARPIPv4,
+                frame.data[@sizeOf(Header)..][0..@sizeOf(ARPIPv4)],
             );
             std.debug.print("[ARP] Who has {s}? Tell {s}\n", .{
                 ipv4fmt(ipv4.daddr),
@@ -273,8 +276,8 @@ pub fn handle(self: *Self, frame: *const Ethernet.Frame) void {
         },
         .arp_reply => {
             const ipv4 = std.mem.bytesToValue(
-                IPv4,
-                frame.data[@sizeOf(Header)..][0..@sizeOf(IPv4)],
+                ARPIPv4,
+                frame.data[@sizeOf(Header)..][0..@sizeOf(ARPIPv4)],
             );
             std.debug.print("[ARP] {s} is at {s}\n", .{
                 ipv4fmt(ipv4.saddr),

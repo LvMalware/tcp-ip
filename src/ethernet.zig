@@ -62,6 +62,8 @@ pub fn readFrame(self: Self) !Frame {
     var buff: [@sizeOf(Frame)]u8 = undefined;
     const size = try self.dev.read(buff[0..]);
     var frame = std.mem.bytesToValue(Frame, buff[0..size]);
+
+    // TODO: maybe not change endianess?
     if (native_endian != .big) {
         std.mem.byteSwapAllFields(Header, &frame.header);
     }
@@ -94,6 +96,7 @@ pub fn transmit(self: Self, data: []const u8, dmac: [6]u8, _type: EtherType) !vo
     std.mem.copyForwards(u8, frame.header.dmac[0..], dmac[0..]);
     std.mem.copyForwards(u8, frame.header.smac[0..], self.dev.hwaddr[0..]);
 
+    // TODO: maybe not change endianess?
     if (native_endian != .big) {
         std.mem.byteSwapAllFields(Header, &frame.header);
     }

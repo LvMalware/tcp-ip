@@ -6,7 +6,7 @@ const Ethernet = @import("ethernet.zig");
 
 const Self = @This();
 
-const Proto = enum(u8) {
+pub const Proto = enum(u8) {
     IP = 0,
     ICMP = 1,
     TCP = 6,
@@ -16,7 +16,7 @@ const Proto = enum(u8) {
     }
 };
 
-const Header = extern struct {
+pub const Header = extern struct {
     ver_ihl: u8 align(1),
     tos: u8 align(1),
     len: u16 align(1),
@@ -27,6 +27,10 @@ const Header = extern struct {
     csum: u16 align(1),
     saddr: u32 align(1),
     daddr: u32 align(1),
+
+    pub fn fromBytes(bytes: []const u8) Header {
+        return std.mem.bytesToValue(Header, bytes[0..@sizeOf(Header)]);
+    }
 
     pub fn ihl(self: Header) u8 {
         return switch (native_endian) {
@@ -67,14 +71,22 @@ const Header = extern struct {
         return @as(usize, self.ihl()) * 4;
     }
 
-    pub fn data(self: *Header, buffer: []const u8) []const u8 {
-        return buffer[self.dataOffset()..self.len];
+    pub fn data(self: Header, buffer: []const u8) []const u8 {
+        return buffer[self.dataOffset()..std.mem.bigToNative(u16, self.len)];
     }
 };
 
 pub const Packet = struct {
     header: Header,
     data: []const u8,
+    pub fn fromBytes(bytes: []const u8) !Packet {
+        const header = Header.fromBytes(bytes);
+        if (!header.validChecksum()) return error.InvalidIPChecksum;
+        return .{
+            .header = header,
+            .data = header.data(bytes),
+        };
+    }
 };
 
 pub const Handler = struct {
@@ -159,22 +171,12 @@ pub fn send(self: *Self, src: ?u32, dst: u32, proto: Proto, data: []const u8) !v
 }
 
 pub fn handle(self: *Self, frame: *const Ethernet.Frame) void {
-    var header = std.mem.bytesToValue(Header, frame.data[0..]);
-    if (!header.validChecksum()) return;
-    if (native_endian != .big) {
-        std.mem.byteSwapAllFields(Header, &header);
-    }
-
-    const proto = Proto.fromInt(header.proto) catch return;
-
-    const packet = Packet{
-        .header = header,
-        .data = header.data(&frame.data),
-    };
+    const packet = Packet.fromBytes(&frame.data) catch return;
+    const proto = Proto.fromInt(packet.header.proto) catch return;
 
     std.debug.print("[IPv{d}] packet of {d} bytes from {d} to {d}\n", .{
         packet.header.version(),
-        packet.header.len,
+        std.mem.bigToNative(u16, packet.header.len),
         packet.header.saddr,
         packet.header.daddr,
     });

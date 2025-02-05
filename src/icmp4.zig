@@ -30,8 +30,8 @@ pub const Header = extern struct {
     type: u8 align(1),
     code: u8 align(1),
     csum: u16 align(1),
-    pub fn fromBytes(data: []const u8) Header {
-        return std.mem.bytesToValue(Header, data[0..@sizeOf(Header)]);
+    pub fn fromBytes(bytes: []const u8) Header {
+        return std.mem.bytesToValue(Header, bytes[0..@sizeOf(Header)]);
     }
     pub fn checksum(self: Header, data: []const u8) u16 {
         var csum: u32 = 0;
@@ -53,8 +53,8 @@ pub const Header = extern struct {
 pub const EchoRequest = extern struct {
     id: u16 align(1),
     seq: u16 align(1),
-    pub fn fromBytes(data: []const u8) EchoRequest {
-        return std.mem.bytesToValue(EchoRequest, data[0..@sizeOf(EchoRequest)]);
+    pub fn fromBytes(bytes: []const u8) EchoRequest {
+        return std.mem.bytesToValue(EchoRequest, bytes[0..@sizeOf(EchoRequest)]);
     }
 };
 
@@ -107,10 +107,7 @@ pub fn handle(self: *Self, packet: *const IPv4.Packet) void {
     switch (htype) {
         .ECHO => {
             self.echoReply(
-                // when we receive an IP packet, the header was converted to
-                // native endianess, so we need to convert the saddr to network
-                // byte-order (big-endian)
-                std.mem.nativeToBig(u32, packet.header.saddr),
+                packet.header.saddr,
                 data,
             ) catch return;
         },
