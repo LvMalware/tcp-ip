@@ -2,6 +2,9 @@ const std = @import("std");
 const native_endian = @import("builtin").target.cpu.arch.endian();
 
 const IPv4 = @import("ipv4.zig");
+const Connection = @import("conn.zig");
+const ConnKey = Connection.Id;
+
 const Self = @This();
 
 const vtable = IPv4.Handler.VTable{ .handle = vhandle };
@@ -33,18 +36,6 @@ const RsvFlags = switch (native_endian) {
     },
 };
 
-pub const ConnKey = struct {
-    saddr: u32 = 0,
-    sport: u16 = 0,
-    daddr: u32 = 0,
-    dport: u16 = 0,
-};
-
-pub const Connection = struct {
-    // TCB struct
-    testing: bool,
-};
-
 pub fn tcpChecksum(saddr: u32, daddr: u32, proto: u8, data: []const u8) u16 {
     var csum: u32 = 0;
     csum += saddr;
@@ -52,8 +43,13 @@ pub fn tcpChecksum(saddr: u32, daddr: u32, proto: u8, data: []const u8) u16 {
     csum += std.mem.nativeToBig(u16, proto);
     csum += std.mem.nativeToBig(u16, @truncate(data.len));
 
-    for (std.mem.bytesAsSlice(u16, data)) |w| {
+    const end = data.len - data.len % 2;
+    for (std.mem.bytesAsSlice(u16, data[0..end])) |w| {
         csum += w;
+    }
+
+    if (end != data.len) {
+        csum += data[end];
     }
 
     while (csum >> 16 != 0) {
@@ -63,16 +59,17 @@ pub fn tcpChecksum(saddr: u32, daddr: u32, proto: u8, data: []const u8) u16 {
     return @truncate(~csum);
 }
 
-const Header = extern struct {
+pub const Header = extern struct {
     sport: u16 align(1),
     dport: u16 align(1),
     seq: u32 align(1),
     ack: u32 align(1),
-    rsv_flags: RsvFlags align(1), // data offset, reserved bytes and flags
+    rsv_flags: RsvFlags align(1), // data offset, reserved bits and flags
     window: u16 align(1),
     csum: u16 align(1),
     urgent: u16 align(1),
-    optpad: u32 align(1), // options and padding
+    // TODO: handle TCP options
+    // optpad: u32 align(1),
 
     pub fn fromBytes(bytes: []const u8) Header {
         return std.mem.bytesToValue(Header, bytes[0..@sizeOf(Header)]);
@@ -99,8 +96,13 @@ const Header = extern struct {
             csum += w;
         }
 
-        for (std.mem.bytesAsSlice(u16, data)) |w| {
+        const end = data.len - data.len % 2;
+        for (std.mem.bytesAsSlice(u16, data[0..end])) |w| {
             csum += w;
+        }
+
+        if (end != data.len) {
+            csum += data[end];
         }
 
         while (csum >> 16 != 0) {
@@ -115,7 +117,7 @@ const Header = extern struct {
     }
 };
 
-const Segment = struct {
+pub const Segment = struct {
     header: Header,
     data: []const u8,
 
@@ -136,14 +138,14 @@ const Segment = struct {
 
 ip: *IPv4,
 allocator: std.mem.Allocator,
-listenning: std.AutoHashMap(ConnKey, Connection),
-connections: std.AutoHashMap(ConnKey, Connection),
+listenning: std.AutoHashMap(ConnKey, *Connection),
+connections: std.AutoHashMap(ConnKey, *Connection),
 pub fn init(allocator: std.mem.Allocator, ip: *IPv4) Self {
     return .{
         .ip = ip,
         .allocator = allocator,
-        .listenning = std.AutoHashMap(ConnKey, Connection).init(allocator),
-        .connections = std.AutoHashMap(ConnKey, Connection).init(allocator),
+        .listenning = std.AutoHashMap(ConnKey, *Connection).init(allocator),
+        .connections = std.AutoHashMap(ConnKey, *Connection).init(allocator),
     };
 }
 
@@ -156,7 +158,7 @@ pub fn handler(self: *Self) IPv4.Handler {
     return .{ .vtable = &vtable, .ptr = self };
 }
 
-fn segmentRST(header: *const Header) Header {
+pub fn segmentRST(header: *const Header) Header {
     return .{
         .seq = if (header.rsv_flags.ack) header.ack else 0,
         .ack = std.mem.nativeToBig(
@@ -168,7 +170,6 @@ fn segmentRST(header: *const Header) Header {
         .urgent = header.urgent,
         .window = 0,
         .csum = 0,
-        .optpad = 0,
         .rsv_flags = .{
             .rsv = 0,
             .ack = true,
@@ -184,37 +185,70 @@ fn segmentRST(header: *const Header) Header {
     };
 }
 
+pub fn addConnection(self: *Self, conn: *Connection) !void {
+    var mapping = switch (conn.state) {
+        .LISTEN => &self.listenning,
+        .CLOSED => return error.ConnectionClosed,
+        else => &self.connections,
+    };
+
+    if (mapping.get(conn.id)) |_| return error.ConnectionReuse;
+    try mapping.put(conn.id, conn);
+}
+
+pub fn removeConnection(self: *Self, conn: *Connection) void {
+    _ = switch (conn.state) {
+        .LISTEN => self.listenning.remove(conn.id),
+        else => self.connections.remove(conn.id),
+    };
+}
+
 pub fn handle(self: *Self, packet: *const IPv4.Packet) void {
     const segment = Segment.fromPacket(packet) catch |err| {
         std.debug.print("[TCP] Discarding packet with error {}\n", .{err});
         return;
     };
 
-    std.debug.print("[TCP] SEQ={d}, ACK={d}, LEN={d}, SYN={}, ACK={}\n", .{
-        segment.header.seq,
-        segment.header.ack,
+    std.debug.print("[TCP] SEQ={d}, ACK={d}, LEN={d}, SYN={}, ACK={}, FIN={}, RST={}\n", .{
+        std.mem.bigToNative(u32, segment.header.seq),
+        std.mem.bigToNative(u32, segment.header.ack),
         segment.data.len,
         segment.header.rsv_flags.syn,
         segment.header.rsv_flags.ack,
+        segment.header.rsv_flags.fin,
+        segment.header.rsv_flags.rst,
     });
-
-    if (self.connections.get(.{
+    const id: ConnKey = .{
         .saddr = packet.header.saddr,
         .sport = segment.header.sport,
         .daddr = packet.header.daddr,
         .dport = segment.header.dport,
-    })) |*conn| {
-        std.debug.print("Packet belongs to connection {}\n", .{conn});
+    };
+
+    if (self.connections.get(id)) |conn| {
+        std.debug.print("Segment belongs to active connection\n", .{});
+        conn.handleSegment(&packet.header, &segment);
+        return;
     } else if (self.listenning.get(.{
         .dport = segment.header.dport,
         .daddr = packet.header.daddr,
-    })) |*connection| {
-        std.debug.print("Passive connection {}\n", .{connection});
+    })) |conn| {
+        std.debug.print("Segment belongs to passive connection\n", .{});
+        if (segment.header.rsv_flags.syn) {
+            conn.handleSegment(&packet.header, &segment);
+        }
+        return;
+    }
+
+    // "If the state is CLOSED (i.e., TCB does not exist) then all data in the
+    // incoming segment is discarded."
+
+    if (segment.header.rsv_flags.rst) {
+        // "An incoming segment containing a RST is discarded."
+        return;
     } else {
-        std.debug.print(
-            "[TCP] Incoming segment to invalid connection. Sending RST\n",
-            .{},
-        );
+        // "An incoming segment not containing a RST causes a RST to be sent in
+        // response."
         var rst = segmentRST(&segment.header);
         rst.csum = rst.checksum(
             packet.header.saddr,

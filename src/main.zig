@@ -5,6 +5,7 @@ const TCP = @import("tcp.zig");
 const Arp = @import("arp.zig");
 const IPv4 = @import("ipv4.zig");
 const ICMP4 = @import("icmp4.zig");
+const Socket = @import("socket.zig");
 const Ethernet = @import("ethernet.zig");
 
 pub fn main() !void {
@@ -27,6 +28,11 @@ pub fn main() !void {
     var tcp = TCP.init(allocator, &ip);
     defer tcp.deinit();
 
+    var server = Socket.init(allocator, &tcp);
+    defer server.deinit();
+
+    try server.listen("10.0.0.4", 5501);
+
     var icmp = ICMP4.init(allocator, &ip);
     defer icmp.deinit();
 
@@ -37,7 +43,15 @@ pub fn main() !void {
 
     // try ip.send(null, 0x0100000a, .IP, "hello");
 
+    var client: ?Socket = null;
+
     while (true) {
         try eth.readAndDispatch();
+        if (client == null and server.events.read > 0) {
+            client = server.accept() catch continue;
+        } else if (client != null and client.?.state() == .CLOSE_WAIT) {
+            client.?.deinit();
+            client = null;
+        }
     }
 }

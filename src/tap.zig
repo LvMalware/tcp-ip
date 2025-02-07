@@ -58,10 +58,7 @@ pub const Device = struct {
             ipv4[i] = try std.fmt.parseInt(u8, octet, 10);
             i += 1;
         }
-        self.ipaddr = std.mem.nativeToBig(
-            u32,
-            std.mem.readInt(u32, &ipv4, native_endian),
-        );
+        // self.ipaddr = std.mem.nativeToBig(u32, std.mem.readInt(u32, &ipv4, native_endian));
         self.ipaddr = std.mem.readInt(u32, &ipv4, native_endian);
     }
 
