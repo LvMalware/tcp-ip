@@ -7,6 +7,7 @@ const IPv4 = @import("ipv4.zig");
 const ICMP4 = @import("icmp4.zig");
 const Socket = @import("socket.zig");
 const Ethernet = @import("ethernet.zig");
+const Sorted = @import("sorted.zig");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -49,9 +50,22 @@ pub fn main() !void {
         try eth.readAndDispatch();
         if (client == null and server.events.read > 0) {
             client = server.accept() catch continue;
-        } else if (client != null and client.?.state() == .CLOSE_WAIT) {
-            client.?.deinit();
-            client = null;
+        } else if (client != null) {
+            if (client.?.state() == .CLOSE_WAIT) {
+                client.?.deinit();
+                client = null;
+                continue;
+            }
+            std.debug.print("Read events: {d}\n", .{client.?.events.read});
+            if (client.?.events.read > 0) {
+                // TODO:
+                const data = client.?.conn.?.received.getAllData() catch |err| {
+                    std.debug.print("Error: {}\n", .{err});
+                    continue;
+                };
+                defer allocator.free(data);
+                std.debug.print("Received: {s}\n", .{data});
+            }
         }
     }
 }

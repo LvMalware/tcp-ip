@@ -24,10 +24,7 @@ pub fn init(allocator: std.mem.Allocator, tcp: *TCP) Self {
         .addr = 0,
         .port = 0,
         .conn = null,
-        .events = .{
-            .read = 0,
-            .write = 0,
-        },
+        .events = .{},
         .allocator = allocator,
     };
 }
@@ -120,4 +117,14 @@ pub fn listen(self: *Self, host: []const u8, port: u16) !void {
     self.conn = try self.allocator.create(Connection);
     try self.conn.?.init(self.allocator, self);
     try self.conn.?.setPassive(self.addr, self.port);
+}
+
+// cur_seq == prev_seq + len
+// xxxx|----|xxxx|----|----|----
+//     ^    ^
+pub fn read(self: *Self, buffer: []u8) !usize {
+    // TODO: block until data is available
+    if (self.events.read < 1) return error.WouldBlock;
+    // self.conn.receive_buffer
+    return buffer.len;
 }

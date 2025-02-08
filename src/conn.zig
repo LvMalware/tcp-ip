@@ -6,6 +6,7 @@ const nativeToBig = std.mem.nativeToBig;
 const TCP = @import("tcp.zig");
 const IPv4 = @import("ipv4.zig");
 const Socket = @import("socket.zig");
+const Sorted = @import("sorted.zig");
 
 const Self = @This();
 
@@ -52,9 +53,9 @@ sock: *Socket,
 state: State = .CLOSED,
 context: Context,
 pending: ?std.AutoHashMap(Id, TCP.Segment),
+received: Sorted,
 allocator: std.mem.Allocator,
 send_buffer: []u8,
-receive_buffer: []u8,
 
 pub fn init(self: *Self, allocator: std.mem.Allocator, sock: *Socket) !void {
     const iss = std.crypto.random.int(u32);
@@ -69,13 +70,14 @@ pub fn init(self: *Self, allocator: std.mem.Allocator, sock: *Socket) !void {
             .sendNext = iss,
             .sendUnack = iss,
         },
+        .received = Sorted.init(allocator),
         .allocator = allocator,
         .send_buffer = undefined,
-        .receive_buffer = try allocator.alloc(u8, default_window),
     };
 }
 
 pub fn deinit(self: *Self) void {
+    self.received.deinit();
     self.tcp.removeConnection(self);
     if (self.pending) |*pending| pending.deinit();
     self.state = .CLOSED;
@@ -104,41 +106,6 @@ pub fn transmit(self: *Self, seg: *TCP.Header, data: []const u8) !void {
     try self.tcp.ip.send(null, self.id.saddr, .TCP, buffer);
 
     self.context.sendNext += if (data.len > 0) @truncate(data.len) else 1;
-}
-
-pub fn segmentACK(self: *Self, seg: *const TCP.Segment) TCP.Header {
-    defer self.context.sendNext += 1;
-
-    const recvNext = bigToNative(u32, seg.header.seq) + if (seg.data.len == 0)
-        1
-    else
-        seg.data.len;
-
-    if (self.context.recvNext < recvNext) {
-        self.context.recvNext = @truncate(recvNext);
-    }
-
-    return .{
-        .seq = nativeToBig(u32, self.context.sendNext),
-        .ack = nativeToBig(u32, @truncate(recvNext)),
-        .csum = 0,
-        .sport = self.id.dport,
-        .dport = self.id.sport,
-        .urgent = 0,
-        .window = nativeToBig(u16, self.context.recvWindow),
-        .rsv_flags = .{
-            .rsv = 0,
-            .ack = true,
-            .rst = false,
-            .fin = false,
-            .syn = false,
-            .psh = false,
-            .urg = false,
-            .ece = false,
-            .cwr = false,
-            .doff = @truncate(@sizeOf(TCP.Header) / 4),
-        },
-    };
 }
 
 pub fn setPassive(self: *Self, addr: u32, port: u16) !void {
@@ -198,6 +165,23 @@ pub fn unacceptable(self: *Self, segment: *const TCP.Segment) void {
         },
     });
     self.transmit(&ack, "") catch {};
+}
+
+pub fn acknowledge(self: *Self, seg: *const TCP.Segment, data: []const u8) void {
+    // TODO: choose data from send buffer, instead of receiving it as a parameter
+    const seq = bigToNative(u32, seg.header.seq) + if (seg.data.len > 0)
+        seg.data.len
+    else
+        1;
+    if (seq > self.context.recvNext) self.context.recvNext = @truncate(seq);
+    var ack = std.mem.zeroInit(TCP.Header, .{
+        .ack = nativeToBig(u32, @truncate(seq)),
+        .rsv_flags = .{
+            .doff = @as(u4, @truncate(@sizeOf(TCP.Header) / 4)),
+            .ack = true,
+        },
+    });
+    self.transmit(&ack, data) catch {};
 }
 
 pub fn reset(self: *Self, segment: *const TCP.Segment, accepted: bool) void {
@@ -413,9 +397,11 @@ pub fn handleSegment(
                 const seq = bigToNative(u32, segment.header.seq);
                 if (ack > self.context.sendNext) {
                     // TODO: send ACK
-                    return;
+                    std.debug.print("ACK is bigger than sendNext\n", .{});
+                    unreachable;
                 } else if (ack < self.context.sendUnack) {
-                    return;
+                    std.debug.print("ACK is less than sendUnack\n", .{});
+                    unreachable;
                 } else if (self.context.sendUnack < ack) {
                     self.context.sendUnack = ack;
                     // TODO: remove acked segments from retransmission queue
@@ -432,7 +418,33 @@ pub fn handleSegment(
                         );
                     }
                 }
-                // TODO: handle data
+                // NOTE:
+                // sendNext + sendWindow = max sequence id we can send to the
+                // receiver at this moment;
+                // recvNext + recvWindow = max sequence id we can accept from
+                // sender at this moment;
+
+                if (segment.data.len > 0) {
+                    std.debug.print("Received data: {s}\n", .{segment.data});
+                    self.received.insert(
+                        seq,
+                        segment.data,
+                        segment.header.rsv_flags.psh,
+                    ) catch return;
+                    self.acknowledge(segment, "");
+                }
+
+                if (segment.header.rsv_flags.psh) {
+                    std.debug.print("PSH!\n", .{});
+                    self.sock.events.read += 1;
+                }
+            }
+
+            // std.debug.print("{}\n", .{segment.header.rsv_flags});
+
+            if (self.state == .CLOSE_WAIT) {
+                self.sock.close();
+                return;
             }
 
             if (segment.header.rsv_flags.urg) {
@@ -442,59 +454,13 @@ pub fn handleSegment(
                 }
                 // TODO: if (self.context.recvUrgent > data consumed ...
             }
+
+            if (segment.header.rsv_flags.fin) {
+                std.debug.print("FIN on established connection!\n", .{});
+                self.acknowledge(segment, "");
+                self.state = .CLOSE_WAIT;
+            }
+            return;
         },
-    }
-
-    if (segment.header.rsv_flags.ack) {
-        // TODO
-        switch (self.state) {
-            .ESTABLISHED => {
-                std.debug.print("Flags: {}\n", .{segment.header.rsv_flags});
-                if (!self.acceptable(segment)) {
-                    std.debug.print("Unacceptable segment!\n", .{});
-                    return;
-                }
-                const seq = bigToNative(u32, segment.header.seq);
-                if (seq >= self.context.sendUnack) self.context.sendUnack = seq;
-                if (segment.header.rsv_flags.fin) {
-                    std.debug.print("FIN on established connection!\n", .{});
-                    var ack = self.segmentACK(segment);
-                    ack.csum = ack.checksum(
-                        self.id.saddr,
-                        self.id.daddr,
-                        @intFromEnum(IPv4.Proto.TCP),
-                        "",
-                    );
-                    self.tcp.ip.send(null, self.id.saddr, .TCP, std.mem.asBytes(&ack)) catch return;
-                    self.state = .CLOSE_WAIT;
-                    return;
-                }
-
-                if (segment.header.rsv_flags.rst) {
-                    // TODO: RST on established connection
-                    return;
-                }
-
-                std.debug.print("Received data: {s}\n", .{segment.data});
-
-                var ack = self.segmentACK(segment);
-                ack.csum = ack.checksum(
-                    self.id.saddr,
-                    self.id.daddr,
-                    @intFromEnum(IPv4.Proto.TCP),
-                    segment.data,
-                );
-                const buffer = self.allocator.alloc(u8, @sizeOf(TCP.Header) + segment.data.len) catch return;
-                defer self.allocator.free(buffer);
-                std.mem.copyForwards(u8, buffer, std.mem.asBytes(&ack));
-                std.mem.copyForwards(u8, buffer[@sizeOf(TCP.Header)..], segment.data);
-                self.tcp.ip.send(null, self.id.saddr, .TCP, std.mem.asBytes(&ack)) catch return;
-            },
-            else => {
-                // TODO
-            },
-        }
-    } else if (segment.header.rsv_flags.fin) {
-        std.debug.print("Fin right away?\n", .{});
     }
 }
