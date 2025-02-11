@@ -69,7 +69,6 @@ pub const Header = extern struct {
     csum: u16 align(1),
     urgent: u16 align(1),
     // TODO: handle TCP options
-    // optpad: u32 align(1),
 
     pub fn fromBytes(bytes: []const u8) Header {
         return std.mem.bytesToValue(Header, bytes[0..@sizeOf(Header)]);
@@ -119,6 +118,7 @@ pub const Header = extern struct {
 
 pub const Segment = struct {
     header: Header,
+    // options: ?[]Options,
     data: []const u8,
 
     pub fn fromPacket(packet: *const IPv4.Packet) !Segment {
@@ -159,7 +159,7 @@ pub fn handler(self: *Self) IPv4.Handler {
 }
 
 pub fn segmentRST(header: *const Header) Header {
-    return .{
+    return std.mem.zeroInit(Header, .{
         .seq = if (header.rsv_flags.ack) header.ack else 0,
         .ack = std.mem.nativeToBig(
             u32,
@@ -167,22 +167,12 @@ pub fn segmentRST(header: *const Header) Header {
         ),
         .sport = header.dport,
         .dport = header.sport,
-        .urgent = header.urgent,
-        .window = 0,
-        .csum = 0,
         .rsv_flags = .{
-            .rsv = 0,
             .ack = true,
             .rst = true,
-            .fin = false,
-            .syn = false,
-            .psh = false,
-            .urg = false,
-            .ece = false,
-            .cwr = false,
-            .doff = @truncate(@sizeOf(Header) / 4),
+            .doff = @as(u4, @truncate(@sizeOf(Header) / 4)),
         },
-    };
+    });
 }
 
 pub fn addConnection(self: *Self, conn: *Connection) !void {
@@ -226,14 +216,12 @@ pub fn handle(self: *Self, packet: *const IPv4.Packet) void {
     };
 
     if (self.connections.get(id)) |conn| {
-        std.debug.print("Segment belongs to active connection\n", .{});
         conn.handleSegment(&packet.header, &segment);
         return;
     } else if (self.listenning.get(.{
         .dport = segment.header.dport,
         .daddr = packet.header.daddr,
     })) |conn| {
-        std.debug.print("Segment belongs to passive connection\n", .{});
         if (segment.header.rsv_flags.syn) {
             conn.handleSegment(&packet.header, &segment);
         }

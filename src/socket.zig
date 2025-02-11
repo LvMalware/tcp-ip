@@ -51,12 +51,11 @@ pub fn close(self: *Self) void {
 }
 
 fn _accepted(self: *Self, id: *const Connection.Id, seg: *const TCP.Segment) !void {
-    std.debug.print("Accepting connection from: {d}\n", .{id.saddr});
     self.addr = id.saddr;
     self.port = id.sport;
     self.conn = try self.allocator.create(Connection);
     if (self.conn) |conn| {
-        try conn.init(self.allocator, self);
+        conn.init(self.allocator, self);
         conn.context.irs = std.mem.bigToNative(u32, seg.header.seq);
         conn.context.recvNext = conn.context.irs + 1;
         try conn.setActive(
@@ -76,19 +75,23 @@ fn _accepted(self: *Self, id: *const Connection.Id, seg: *const TCP.Segment) !vo
         });
 
         try conn.transmit(&ack, "");
+        // after transmiting the SYN-ACK, we increment SND.NXT by 1
+        conn.context.sendNext += 1;
     }
 }
 
-pub fn accept(self: *Self) !Self {
+pub fn accept(self: *Self) !*Self {
     // TODO: block if events.read is 0
     if (self.events.read == 0) return error.NotPending;
     if (self.state() != .LISTEN) return error.NotListenning;
     var entries = self.conn.?.pending.?.iterator();
     if (entries.next()) |kv| {
         defer self.events.read -= 1;
-        var client = Self.init(self.allocator, self.tcp);
+        var client = try self.allocator.create(Self);
+        client.* = Self.init(self.allocator, self.tcp);
         errdefer |err| {
             client.deinit();
+            self.allocator.destroy(client);
             std.debug.print("Error: {}\n", .{err});
             // for debug only:
             unreachable;
@@ -101,13 +104,12 @@ pub fn accept(self: *Self) !Self {
 }
 
 pub fn connect(self: *Self, host: []const u8, port: u16) !void {
-    // TODO
     _ = .{ self, host, port };
+    return error.TODO;
 }
 
 pub fn state(self: Self) Connection.State {
-    if (self.conn) |conn| return conn.state;
-    return .CLOSED;
+    return if (self.conn) |conn| conn.state else .CLOSED;
 }
 
 pub fn listen(self: *Self, host: []const u8, port: u16) !void {
@@ -115,16 +117,28 @@ pub fn listen(self: *Self, host: []const u8, port: u16) !void {
     self.addr = try Utils.pton(host);
     self.port = std.mem.nativeToBig(u16, port);
     self.conn = try self.allocator.create(Connection);
-    try self.conn.?.init(self.allocator, self);
+    self.conn.?.init(self.allocator, self);
     try self.conn.?.setPassive(self.addr, self.port);
 }
 
-// cur_seq == prev_seq + len
-// xxxx|----|xxxx|----|----|----
-//     ^    ^
 pub fn read(self: *Self, buffer: []u8) !usize {
     // TODO: block until data is available
+    if (self.state() == .CLOSED) return error.NotConnected;
     if (self.events.read < 1) return error.WouldBlock;
-    // self.conn.receive_buffer
+    defer self.events.read -= 1;
+    return try self.conn.?.received.getData(buffer);
+}
+
+pub fn write(self: *Self, buffer: []const u8) !usize {
+    // TODO: block if events.write is 0
+    var hdr = std.mem.zeroInit(TCP.Header, .{
+        .rsv_flags = .{
+            .doff = @as(u4, @truncate(@sizeOf(TCP.Header) / 4)),
+            .ack = true,
+            .psh = true,
+        },
+        .ack = std.mem.nativeToBig(u32, self.conn.?.context.recvNext),
+    });
+    try self.conn.?.transmit(&hdr, buffer);
     return buffer.len;
 }

@@ -44,7 +44,9 @@ pub fn main() !void {
 
     // try ip.send(null, 0x0100000a, .IP, "hello");
 
-    var client: ?Socket = null;
+    var client: ?*Socket = null;
+
+    var buffer: [1024]u8 = undefined;
 
     while (true) {
         try eth.readAndDispatch();
@@ -53,18 +55,20 @@ pub fn main() !void {
         } else if (client != null) {
             if (client.?.state() == .CLOSE_WAIT) {
                 client.?.deinit();
+                allocator.destroy(client.?);
                 client = null;
                 continue;
             }
-            std.debug.print("Read events: {d}\n", .{client.?.events.read});
+            client.?.conn.?.retransmit() catch {};
             if (client.?.events.read > 0) {
                 // TODO:
-                const data = client.?.conn.?.received.getAllData() catch |err| {
+
+                const size = client.?.read(buffer[0..]) catch |err| {
                     std.debug.print("Error: {}\n", .{err});
                     continue;
                 };
-                defer allocator.free(data);
-                std.debug.print("Received: {s}\n", .{data});
+                _ = client.?.write(buffer[0..size]) catch {};
+                std.debug.print("Received: {s}\n", .{buffer[0..size]});
             }
         }
     }

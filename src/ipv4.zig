@@ -166,7 +166,6 @@ pub fn send(self: *Self, src: ?u32, dst: u32, proto: Proto, data: []const u8) !v
     std.mem.copyForwards(u8, buffer, &std.mem.toBytes(header));
     std.mem.copyForwards(u8, buffer[header.dataOffset()..], data);
     const dmac = try self.arp.resolveWait(dst);
-    std.debug.print("Sending IP packet to {x}\n", .{dmac});
     try self.ethernet.transmit(buffer, dmac, .ip4);
 }
 

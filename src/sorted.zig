@@ -5,7 +5,7 @@ const Self = @This();
 const List = std.DoublyLinkedList(Item);
 
 pub const Item = struct {
-    seq: u32, // start of data
+    seq: usize, // start of data
     end: usize, // seq + data.len
     psh: bool,
     data: []const u8,
@@ -35,38 +35,60 @@ pub fn clear(self: *Self) void {
 }
 
 pub fn getData(self: *Self, buffer: []u8) !usize {
-    _ = self;
-    return buffer.len;
+    var node = self.items.first;
+    var last: usize = if (node) |f| f.data.seq else return error.NoData;
+    var index: usize = 0;
+
+    while (node != null) {
+        const item = node.?.data;
+        const avail = buffer.len - index;
+        if (item.seq >= last) {
+            const diff = item.end - last;
+            const data = item.data[item.data.len - diff ..];
+            const size = if (avail > data.len) data.len else avail;
+            std.mem.copyForwards(u8, buffer[index..], item.data[0..size]);
+            index += size;
+            last += size;
+            // TODO: add the size to seq and then ensure the whole data has
+            // been consumed before removing the segment
+        } else if (item.seq > last) {
+            // TODO: block until data is contiguous
+            return error.NonContiguousData;
+        }
+        if (item.psh or index == buffer.len) break;
+        node = node.?.next;
+    }
+
+    // TODO: if buffer is not full and there is no PSH, block until the buffer
+    // fills or there is PSH
+
+    var item = self.items.first;
+    while (item != null and item != node) {
+        const next = item.?.next;
+        self.items.remove(item.?);
+        self.allocator.free(item.?.data.data);
+        self.allocator.destroy(item.?);
+        item = next;
+    }
+
+    if (node != null and last >= node.?.data.end) {
+        self.items.remove(node.?);
+        self.allocator.free(node.?.data.data);
+        self.allocator.destroy(node.?);
+    }
+
+    self.data_len -= index;
+
+    return index;
 }
 
 pub fn getAllData(self: *Self) ![]u8 {
-    var node = self.items.first;
-    var last: usize = if (node) |f| f.data.seq else return error.NoData;
-
-    var index: usize = 0;
     const buffer = try self.allocator.alloc(u8, self.data_len);
 
-    while (node != null) : (node = node.?.next) {
-        const item = node.?.data;
-        if (item.seq == last) {
-            std.mem.copyForwards(u8, buffer[index..], item.data);
-            index += item.data.len;
-            last = item.end;
-        } else if (item.end > last) {
-            const len = item.end - last;
-            const data = item.data[item.data.len - len ..];
-            std.mem.copyForwards(u8, buffer[index..], data);
-            index += data.len;
-            last = item.end;
-        } else if (item.seq > last) {
-            // non-contiguous data
-            return error.NonContiguousData;
-        }
-        if (item.psh) break;
-    }
+    const size = try self.getData(buffer);
 
-    return if (index < buffer.len)
-        self.allocator.realloc(buffer, index)
+    return if (size < buffer.len)
+        self.allocator.realloc(buffer, size)
     else
         buffer;
 }
@@ -94,7 +116,6 @@ pub fn insert(self: *Self, seq: u32, data: []const u8, psh: bool) !void {
             if (item.?.prev) |prev| {
                 if (prev.data.end >= node.data.end) return;
             }
-            std.debug.print("Added data\n", .{});
             self.items.insertBefore(item.?, node);
             self.data_len += data.len;
             return;
@@ -103,5 +124,4 @@ pub fn insert(self: *Self, seq: u32, data: []const u8, psh: bool) !void {
 
     self.items.append(node);
     self.data_len += data.len;
-    std.debug.print("Added data\n", .{});
 }
