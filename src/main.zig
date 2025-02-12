@@ -44,32 +44,23 @@ pub fn main() !void {
 
     // try ip.send(null, 0x0100000a, .IP, "hello");
 
-    var client: ?*Socket = null;
+    var client = Socket.init(allocator, &tcp);
 
     var buffer: [1024]u8 = undefined;
 
+    std.time.sleep(5 * std.time.ns_per_s);
     while (true) {
         try eth.readAndDispatch();
-        if (client == null and server.events.read > 0) {
-            client = server.accept() catch continue;
-        } else if (client != null) {
-            if (client.?.state() == .CLOSE_WAIT) {
-                client.?.deinit();
-                allocator.destroy(client.?);
-                client = null;
-                continue;
+        if (client.state() == .CLOSED) {
+            try client.connect("10.0.0.1", 5501);
+        } else if (client.state() == .ESTABLISHED) {
+            if (client.events.read > 0) {
+                const size = try client.read(buffer[0..]);
+                std.debug.print("Read: {s}\n", .{buffer[0..size]});
+                _ = try client.write(buffer[0..size]);
             }
-            client.?.conn.?.retransmit() catch {};
-            if (client.?.events.read > 0) {
-                // TODO:
-
-                const size = client.?.read(buffer[0..]) catch |err| {
-                    std.debug.print("Error: {}\n", .{err});
-                    continue;
-                };
-                _ = client.?.write(buffer[0..size]) catch {};
-                std.debug.print("Received: {s}\n", .{buffer[0..size]});
-            }
+        } else if (client.state() == .TIME_WAIT) {
+            client.close();
         }
     }
 }

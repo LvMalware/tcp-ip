@@ -213,7 +213,7 @@ pub fn handleSegment(
     ip: *const IPv4.Header,
     segment: *const TCP.Segment,
 ) void {
-    defer self.retransmit() catch {};
+    // defer self.retransmit() catch {};
     const isAcceptable = self.acceptable(segment);
 
     switch (self.state) {
@@ -249,10 +249,12 @@ pub fn handleSegment(
             }
         },
         .SYN_SENT => {
+            std.debug.print("Received packet in SYN-SENT\n", .{});
             if (segment.header.rsv_flags.fin) return;
             if (segment.header.rsv_flags.ack) {
                 const ack = bigToNative(u32, segment.header.ack);
                 if (ack <= self.context.iss or ack > self.context.sendNext) {
+                    std.debug.print("Invalid segment?\n", .{});
                     if (segment.header.rsv_flags.rst) return;
 
                     var rst: TCP.Header = std.mem.zeroInit(TCP.Header, .{
@@ -269,6 +271,7 @@ pub fn handleSegment(
                 self.context.sendUnack = ack;
             }
             if (segment.header.rsv_flags.rst) {
+                std.debug.print("Connection rejected\n", .{});
                 self.sock.close();
                 return;
             }
@@ -355,6 +358,7 @@ pub fn handleSegment(
             }
         },
         .TIME_WAIT => {
+            // TODO: create a timeout to close the connection
             if (!isAcceptable) {
                 self.unacceptable(segment);
                 return;

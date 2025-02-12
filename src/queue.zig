@@ -27,7 +27,7 @@ pub fn init(allocator: std.mem.Allocator, rtt: usize) Self {
 pub fn deinit(self: *Self) void {
     while (self.items.pop()) |node| {
         self.allocator.free(node.data.data);
-        self.allocator.free(node);
+        self.allocator.destroy(node);
     }
 }
 

@@ -39,8 +39,9 @@ pub fn deinit(self: *Self) void {
 
 pub fn close(self: *Self) void {
     if (self.state() == .CLOSED) return;
+    std.debug.print("Closing connection!\n", .{});
     switch (self.state()) {
-        .ESTABLISHED => {
+        .ESTABLISHED, .SYN_SENT => {
             // TODO: send FIN
             self.addr = 0;
             self.port = 0;
@@ -105,7 +106,36 @@ pub fn accept(self: *Self) !*Self {
 
 pub fn connect(self: *Self, host: []const u8, port: u16) !void {
     _ = .{ self, host, port };
-    return error.TODO;
+    self.addr = try Utils.pton(host);
+    self.port = std.mem.nativeToBig(u16, port);
+    self.conn = try self.allocator.create(Connection);
+    const sport = std.mem.nativeToBig(
+        u16,
+        std.crypto.random.intRangeAtMost(u16, 1025, 65535),
+    );
+    if (self.conn) |conn| {
+        conn.init(self.allocator, self);
+        try conn.setActive(
+            .SYN_SENT,
+            self.addr,
+            self.port,
+            self.tcp.ip.ethernet.dev.ipaddr,
+            sport,
+        );
+
+        var ack: TCP.Header = std.mem.zeroInit(TCP.Header, .{
+            .sport = sport,
+            .dport = self.port,
+            .rsv_flags = .{
+                .doff = @as(u4, @truncate(@sizeOf(TCP.Header) / 4)),
+                .syn = true,
+            },
+        });
+
+        try conn.transmit(&ack, "");
+        conn.context.sendNext += 1;
+        // TODO: block until SYN-ACK or RST
+    }
 }
 
 pub fn state(self: Self) Connection.State {
@@ -131,6 +161,7 @@ pub fn read(self: *Self, buffer: []u8) !usize {
 
 pub fn write(self: *Self, buffer: []const u8) !usize {
     // TODO: block if events.write is 0
+    // TODO: add to outgoing buffer instead of sending right away
     var hdr = std.mem.zeroInit(TCP.Header, .{
         .rsv_flags = .{
             .doff = @as(u4, @truncate(@sizeOf(TCP.Header) / 4)),
