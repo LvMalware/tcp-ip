@@ -173,12 +173,12 @@ pub fn handle(self: *Self, frame: *const Ethernet.Frame) void {
     const packet = Packet.fromBytes(&frame.data) catch return;
     const proto = Proto.fromInt(packet.header.proto) catch return;
 
-    std.debug.print("[IPv{d}] packet of {d} bytes from {d} to {d}\n", .{
-        packet.header.version(),
-        std.mem.bigToNative(u16, packet.header.len),
-        packet.header.saddr,
-        packet.header.daddr,
-    });
+    // std.debug.print("[IPv{d}] packet of {d} bytes from {d} to {d}\n", .{
+    //     packet.header.version(),
+    //     std.mem.bigToNative(u16, packet.header.len),
+    //     packet.header.saddr,
+    //     packet.header.daddr,
+    // });
 
     if (self.handlers.get(proto)) |*h| {
         h.handle(&packet);

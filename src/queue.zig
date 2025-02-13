@@ -14,17 +14,21 @@ const Segment = struct {
 
 rto: usize,
 items: std.TailQueue(Segment),
+mutex: std.Thread.Mutex,
 allocator: std.mem.Allocator,
 
 pub fn init(allocator: std.mem.Allocator, rtt: usize) Self {
     return .{
         .rto = rtt + 100 * std.time.ns_per_ms,
         .items = .{},
+        .mutex = .{},
         .allocator = allocator,
     };
 }
 
 pub fn deinit(self: *Self) void {
+    self.mutex.lock();
+    defer self.mutex.unlock();
     while (self.items.pop()) |node| {
         self.allocator.free(node.data.data);
         self.allocator.destroy(node);
@@ -32,6 +36,8 @@ pub fn deinit(self: *Self) void {
 }
 
 pub fn enqueue(self: *Self, seq: u32, len: usize, data: []const u8) !void {
+    self.mutex.lock();
+    defer self.mutex.unlock();
     const node = try self.allocator.create(std.TailQueue(Segment).Node);
     node.data = .{
         .seq = seq,
@@ -45,6 +51,8 @@ pub fn enqueue(self: *Self, seq: u32, len: usize, data: []const u8) !void {
 }
 
 pub fn ack(self: *Self, seq: u32) void {
+    self.mutex.lock();
+    defer self.mutex.unlock();
     var node = self.items.first;
     while (node != null) {
         const nxt = node.?.next;
@@ -59,6 +67,8 @@ pub fn ack(self: *Self, seq: u32) void {
 }
 
 pub fn next(self: *Self) ?[]const u8 {
+    self.mutex.lock();
+    defer self.mutex.unlock();
     var node = self.items.first;
     while (node != null) : (node = node.?.next) {
         if (node.?.data.timer.read() >= node.?.data.delay) {

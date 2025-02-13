@@ -79,7 +79,6 @@ pub fn deinit(self: *Self) void {
 }
 
 pub fn echoReply(self: *Self, dst: u32, data: []const u8) !void {
-    std.debug.print("Echo reply?\n", .{});
     var header: Header = .{
         .type = @intFromEnum(ICMPType.ECHOREPLY),
         .code = 0,

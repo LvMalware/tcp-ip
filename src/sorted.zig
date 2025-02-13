@@ -8,26 +8,41 @@ pub const Item = struct {
     seq: usize, // start of data
     end: usize, // seq + data.len
     psh: bool,
+    con: bool,
     data: []const u8,
 };
 
+psh: usize,
 items: List,
+mutex: std.Thread.Mutex,
 data_len: usize,
+condition: std.Thread.Condition,
 allocator: std.mem.Allocator,
+last_cont: ?usize,
+contiguous_len: usize,
 
 pub fn init(allocator: std.mem.Allocator) Self {
     return .{
+        .psh = 0,
         .items = .{},
+        .mutex = .{},
         .data_len = 0,
         .allocator = allocator,
+        .last_cont = null,
+        .condition = .{},
+        .contiguous_len = 0,
     };
 }
 
 pub fn deinit(self: *Self) void {
+    self.psh += 1;
+    self.condition.signal();
     self.clear();
 }
 
 pub fn clear(self: *Self) void {
+    self.mutex.lock();
+    defer self.mutex.unlock();
     while (self.items.pop()) |last| {
         self.allocator.free(last.data.data);
         self.allocator.destroy(last);
@@ -35,6 +50,16 @@ pub fn clear(self: *Self) void {
 }
 
 pub fn getData(self: *Self, buffer: []u8) !usize {
+    self.mutex.lock();
+    defer self.mutex.unlock();
+
+    while (self.contiguous_len < buffer.len and self.psh == 0) {
+        //std.debug.print("Blocking for {d} bytes, avail: {d} (PSH: {d})\n", .{ buffer.len, self.contiguous_len, self.psh });
+        self.condition.wait(&self.mutex);
+        // std.debug.print("Unblocked!\n", .{});
+    }
+    // TODO: block until there is either a contiguous block of buffer.len bytes
+    // or a contiguous block of data with a PSH
     var node = self.items.first;
     var last: usize = if (node) |f| f.data.seq else return error.NoData;
     var index: usize = 0;
@@ -52,15 +77,15 @@ pub fn getData(self: *Self, buffer: []u8) !usize {
             // TODO: add the size to seq and then ensure the whole data has
             // been consumed before removing the segment
         } else if (item.seq > last) {
-            // TODO: block until data is contiguous
             return error.NonContiguousData;
         }
-        if (item.psh or index == buffer.len) break;
+        if (item.psh) {
+            self.psh -= 1;
+            break;
+        }
+        if (index == buffer.len) break;
         node = node.?.next;
     }
-
-    // TODO: if buffer is not full and there is no PSH, block until the buffer
-    // fills or there is PSH
 
     var item = self.items.first;
     while (item != null and item != node) {
@@ -78,12 +103,13 @@ pub fn getData(self: *Self, buffer: []u8) !usize {
     }
 
     self.data_len -= index;
+    self.contiguous_len -= index;
 
     return index;
 }
 
 pub fn getAllData(self: *Self) ![]u8 {
-    const buffer = try self.allocator.alloc(u8, self.data_len);
+    const buffer = try self.allocator.alloc(u8, self.contiguous_len);
 
     const size = try self.getData(buffer);
 
@@ -93,7 +119,43 @@ pub fn getAllData(self: *Self) ![]u8 {
         buffer;
 }
 
-pub fn insert(self: *Self, seq: u32, data: []const u8, psh: bool) !void {
+fn checkContiguous(self: *Self, node: *List.Node) void {
+    if (node.prev) |prev| {
+        node.data.con = prev.data.con and prev.data.end >= node.data.seq;
+        if (node.data.con) {
+            self.contiguous_len += node.data.end - prev.data.end;
+        } else return;
+    } else {
+        node.data.con = if (self.last_cont) |last|
+            last >= node.data.seq
+        else
+            true;
+        if (!node.data.con) return;
+        self.contiguous_len += node.data.data.len;
+    }
+
+    self.last_cont = node.data.end;
+
+    if (node.data.psh) self.psh += 1;
+
+    var next = node.next;
+    while (next != null) : (next = next.?.next) {
+        next.?.data.con = next.?.prev.?.data.end >= next.?.data.seq;
+        if (!next.?.data.con) break;
+        self.contiguous_len += next.?.data.end - next.?.prev.?.data.end;
+        self.last_cont = next.?.data.end;
+        if (next.?.data.psh) self.psh += 1;
+    }
+}
+
+pub fn insert(self: *Self, seq: usize, data: []const u8, psh: bool) !void {
+    self.mutex.lock();
+    defer self.mutex.unlock();
+
+    defer {
+        self.condition.signal();
+    }
+
     const node = try self.allocator.create(List.Node);
     errdefer self.allocator.destroy(node);
 
@@ -101,6 +163,7 @@ pub fn insert(self: *Self, seq: u32, data: []const u8, psh: bool) !void {
         .seq = seq,
         .end = seq + data.len,
         .psh = psh,
+        .con = false,
         .data = try self.allocator.dupe(u8, data),
     };
 
@@ -108,20 +171,27 @@ pub fn insert(self: *Self, seq: u32, data: []const u8, psh: bool) !void {
 
     // TODO: check data boundaries when inserting to skip previously received
     // data
+
     while (item != null) : (item = item.?.next) {
         if (item.?.data.seq <= seq and item.?.data.end >= node.data.end)
             return;
 
         if (item.?.data.seq > seq) {
             if (item.?.prev) |prev| {
-                if (prev.data.end >= node.data.end) return;
+                if (prev.data.end >= node.data.end) {
+                    self.allocator.free(node.data.data);
+                    self.allocator.destroy(node);
+                    return;
+                }
             }
             self.items.insertBefore(item.?, node);
             self.data_len += data.len;
+            self.checkContiguous(node);
             return;
         }
     }
 
     self.items.append(node);
     self.data_len += data.len;
+    self.checkContiguous(node);
 }

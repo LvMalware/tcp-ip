@@ -172,6 +172,7 @@ pub fn request(self: Self, addr: u32) !void {
 }
 
 pub fn resolve(self: *Self, addr: u32) ![6]u8 {
+    if (addr == self.ethernet.dev.ipaddr) return self.ethernet.dev.hwaddr;
     for (self.cache.items) |i| {
         if (i.saddr != addr) {
             continue;

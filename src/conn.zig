@@ -51,7 +51,9 @@ pub const State = enum(u8) {
 id: Id,
 tcp: *TCP,
 sock: *Socket,
+mutex: std.Thread.Mutex,
 state: State = .CLOSED,
+changed: std.Thread.Condition,
 context: Context,
 pending: ?std.AutoHashMap(Id, TCP.Segment),
 received: Sorted,
@@ -66,6 +68,8 @@ pub fn init(self: *Self, allocator: std.mem.Allocator, sock: *Socket) void {
         .id = undefined,
         .tcp = sock.tcp,
         .sock = sock,
+        .mutex = .{},
+        .changed = .{},
         .pending = null,
         .context = .{
             .iss = iss,
@@ -85,6 +89,7 @@ pub fn deinit(self: *Self) void {
     self.tcp.removeConnection(self);
     if (self.pending) |*pending| pending.deinit();
     self.state = .CLOSED;
+    self.changed.signal();
 }
 
 pub fn retransmit(self: *Self) !void {
@@ -126,6 +131,7 @@ pub fn setPassive(self: *Self, addr: u32, port: u16) !void {
         .dport = port,
     };
     self.state = .LISTEN;
+    self.changed.signal();
     self.pending = std.AutoHashMap(Id, TCP.Segment).init(self.allocator);
     try self.tcp.addConnection(self);
 }
@@ -146,6 +152,7 @@ pub fn setActive(
         .daddr = daddr,
     };
     self.state = state;
+    self.changed.signal();
     try self.tcp.addConnection(self);
 }
 
@@ -213,7 +220,13 @@ pub fn handleSegment(
     ip: *const IPv4.Header,
     segment: *const TCP.Segment,
 ) void {
-    // defer self.retransmit() catch {};
+    // std.debug.print("[THREAD {d}] Locked\n", .{std.Thread.getCurrentId()});
+    self.mutex.lock();
+    defer {
+        // std.debug.print("[THREAD {d}] Unlocked\n", .{std.Thread.getCurrentId()});
+        self.mutex.unlock();
+    }
+
     const isAcceptable = self.acceptable(segment);
 
     switch (self.state) {
@@ -249,12 +262,11 @@ pub fn handleSegment(
             }
         },
         .SYN_SENT => {
-            std.debug.print("Received packet in SYN-SENT\n", .{});
+            // std.debug.print("Received something on SYN-SENT\n", .{});
             if (segment.header.rsv_flags.fin) return;
             if (segment.header.rsv_flags.ack) {
                 const ack = bigToNative(u32, segment.header.ack);
                 if (ack <= self.context.iss or ack > self.context.sendNext) {
-                    std.debug.print("Invalid segment?\n", .{});
                     if (segment.header.rsv_flags.rst) return;
 
                     var rst: TCP.Header = std.mem.zeroInit(TCP.Header, .{
@@ -271,8 +283,9 @@ pub fn handleSegment(
                 self.context.sendUnack = ack;
             }
             if (segment.header.rsv_flags.rst) {
-                std.debug.print("Connection rejected\n", .{});
-                self.sock.close();
+                //self.sock.close();
+                self.state = .CLOSED;
+                self.changed.signal();
                 return;
             }
             // TODO: check security and precedence
@@ -281,7 +294,6 @@ pub fn handleSegment(
                 self.context.recvNext = self.context.irs + 1;
 
                 if (self.context.sendUnack > self.context.iss) {
-                    self.state = .ESTABLISHED;
                     var ack: TCP.Header = std.mem.zeroInit(TCP.Header, .{
                         .rsv_flags = .{
                             .doff = @as(u4, @truncate(@sizeOf(TCP.Header) / 4)),
@@ -290,8 +302,12 @@ pub fn handleSegment(
                         .ack = std.mem.nativeToBig(u32, self.context.recvNext),
                     });
                     self.transmit(&ack, "") catch {};
+                    // std.debug.print("Connected!\n", .{});
+                    self.state = .ESTABLISHED;
+                    self.changed.signal();
                 } else {
                     self.state = .SYN_RECEIVED;
+                    self.changed.signal();
                     var ack: TCP.Header = std.mem.zeroInit(TCP.Header, .{
                         .rsv_flags = .{
                             .doff = @as(u4, @truncate(@sizeOf(TCP.Header) / 4)),
@@ -318,6 +334,7 @@ pub fn handleSegment(
                 const ack = bigToNative(u32, segment.header.ack);
                 if (self.context.sendUnack <= ack and ack <= self.context.sendNext) {
                     self.state = .ESTABLISHED;
+                    self.changed.signal();
                 } else {
                     self.reset(segment, false);
                     return;
@@ -328,10 +345,11 @@ pub fn handleSegment(
                 self.context.sendWindow = bigToNative(u16, segment.header.window);
                 // TODO: allocate send_window
                 self.state = .ESTABLISHED;
+                self.changed.signal();
                 return;
             }
         },
-        .CLOSED => unreachable,
+        .CLOSED => return,
         .CLOSING => {
             if (!isAcceptable) {
                 self.unacceptable(segment);
@@ -358,7 +376,7 @@ pub fn handleSegment(
             }
         },
         .TIME_WAIT => {
-            // TODO: create a timeout to close the connection
+            // TODO: start a timer to close the connection
             if (!isAcceptable) {
                 self.unacceptable(segment);
                 return;
@@ -380,8 +398,10 @@ pub fn handleSegment(
 
             if (segment.header.rsv_flags.fin) {
                 self.state = .TIME_WAIT;
+                self.changed.signal();
             } else if (segment.header.rsv_flags.ack) {
                 self.state = .FIN_WAIT2;
+                self.changed.signal();
             }
         },
         .FIN_WAIT2 => {
@@ -399,6 +419,7 @@ pub fn handleSegment(
             }
             if (segment.header.rsv_flags.fin) {
                 self.state = .TIME_WAIT;
+                self.changed.signal();
             }
         },
         .CLOSE_WAIT => {
@@ -410,6 +431,7 @@ pub fn handleSegment(
                 self.sock.close();
                 return;
             }
+            // TODO: start a timer to finish connection
         },
         .ESTABLISHED => {
             if (!isAcceptable) {
@@ -426,8 +448,8 @@ pub fn handleSegment(
                 const seq = bigToNative(u32, segment.header.seq);
                 if (ack > self.context.sendNext) {
                     // TODO: send ACK
-                    self.acknowledge(segment, "");
                     std.debug.print("Warning: ACK is bigger than sendNext!\n", .{});
+                    self.acknowledge(segment, "");
                     return;
                 } else if (ack < self.context.sendUnack) {
                     std.debug.print("Warning: ACK is less than sendUnack!\n", .{});
@@ -482,6 +504,12 @@ pub fn handleSegment(
             if (segment.header.rsv_flags.fin) {
                 self.acknowledge(segment, "");
                 self.state = .CLOSE_WAIT;
+                self.changed.signal();
+                if (segment.data.len == 0) self.received.insert(
+                    bigToNative(u32, segment.header.seq),
+                    "",
+                    true,
+                ) catch {};
             }
             return;
         },

@@ -16,6 +16,7 @@ tcp: *TCP,
 addr: u32,
 port: u16,
 conn: ?*Connection,
+mutex: std.Thread.Mutex,
 events: Events,
 allocator: std.mem.Allocator,
 pub fn init(allocator: std.mem.Allocator, tcp: *TCP) Self {
@@ -24,6 +25,7 @@ pub fn init(allocator: std.mem.Allocator, tcp: *TCP) Self {
         .addr = 0,
         .port = 0,
         .conn = null,
+        .mutex = .{},
         .events = .{},
         .allocator = allocator,
     };
@@ -83,8 +85,8 @@ fn _accepted(self: *Self, id: *const Connection.Id, seg: *const TCP.Segment) !vo
 
 pub fn accept(self: *Self) !*Self {
     // TODO: block if events.read is 0
-    if (self.events.read == 0) return error.NotPending;
     if (self.state() != .LISTEN) return error.NotListenning;
+    if (self.events.read == 0) return error.NotPending;
     var entries = self.conn.?.pending.?.iterator();
     if (entries.next()) |kv| {
         defer self.events.read -= 1;
@@ -105,7 +107,8 @@ pub fn accept(self: *Self) !*Self {
 }
 
 pub fn connect(self: *Self, host: []const u8, port: u16) !void {
-    _ = .{ self, host, port };
+    self.mutex.lock();
+    defer self.mutex.unlock();
     self.addr = try Utils.pton(host);
     self.port = std.mem.nativeToBig(u16, port);
     self.conn = try self.allocator.create(Connection);
@@ -134,7 +137,16 @@ pub fn connect(self: *Self, host: []const u8, port: u16) !void {
 
         try conn.transmit(&ack, "");
         conn.context.sendNext += 1;
-        // TODO: block until SYN-ACK or RST
+
+        // std.debug.print("State before: {}\n", .{conn.state});
+        while (conn.state == .SYN_SENT) {
+            conn.changed.wait(&self.mutex);
+        }
+        // std.debug.print("State after: {}\n", .{conn.state});
+        if (conn.state == .CLOSED) {
+            self.deinit();
+            return error.ConnectionRefused;
+        }
     }
 }
 
@@ -152,10 +164,7 @@ pub fn listen(self: *Self, host: []const u8, port: u16) !void {
 }
 
 pub fn read(self: *Self, buffer: []u8) !usize {
-    // TODO: block until data is available
     if (self.state() == .CLOSED) return error.NotConnected;
-    if (self.events.read < 1) return error.WouldBlock;
-    defer self.events.read -= 1;
     return try self.conn.?.received.getData(buffer);
 }
 
