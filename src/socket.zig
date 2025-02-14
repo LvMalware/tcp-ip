@@ -18,6 +18,7 @@ port: u16,
 conn: ?*Connection,
 mutex: std.Thread.Mutex,
 events: Events,
+canread: std.Thread.Condition,
 allocator: std.mem.Allocator,
 pub fn init(allocator: std.mem.Allocator, tcp: *TCP) Self {
     return .{
@@ -27,6 +28,7 @@ pub fn init(allocator: std.mem.Allocator, tcp: *TCP) Self {
         .conn = null,
         .mutex = .{},
         .events = .{},
+        .canread = .{},
         .allocator = allocator,
     };
 }
@@ -84,9 +86,14 @@ fn _accepted(self: *Self, id: *const Connection.Id, seg: *const TCP.Segment) !vo
 }
 
 pub fn accept(self: *Self) !*Self {
-    // TODO: block if events.read is 0
+    self.mutex.lock();
+    defer self.mutex.unlock();
     if (self.state() != .LISTEN) return error.NotListenning;
-    if (self.events.read == 0) return error.NotPending;
+
+    while (self.events.read == 0) {
+        self.canread.wait(&self.mutex);
+    }
+
     var entries = self.conn.?.pending.?.iterator();
     if (entries.next()) |kv| {
         defer self.events.read -= 1;
@@ -138,11 +145,9 @@ pub fn connect(self: *Self, host: []const u8, port: u16) !void {
         try conn.transmit(&ack, "");
         conn.context.sendNext += 1;
 
-        // std.debug.print("State before: {}\n", .{conn.state});
         while (conn.state == .SYN_SENT) {
             conn.changed.wait(&self.mutex);
         }
-        // std.debug.print("State after: {}\n", .{conn.state});
         if (conn.state == .CLOSED) {
             self.deinit();
             return error.ConnectionRefused;

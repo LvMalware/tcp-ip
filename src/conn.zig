@@ -84,6 +84,8 @@ pub fn init(self: *Self, allocator: std.mem.Allocator, sock: *Socket) void {
 }
 
 pub fn deinit(self: *Self) void {
+    self.mutex.lock();
+    defer self.mutex.unlock();
     self.received.deinit();
     self.retransmission.deinit();
     self.tcp.removeConnection(self);
@@ -220,13 +222,12 @@ pub fn handleSegment(
     ip: *const IPv4.Header,
     segment: *const TCP.Segment,
 ) void {
-    // std.debug.print("[THREAD {d}] Locked\n", .{std.Thread.getCurrentId()});
     self.mutex.lock();
     defer {
-        // std.debug.print("[THREAD {d}] Unlocked\n", .{std.Thread.getCurrentId()});
         self.mutex.unlock();
     }
 
+    // std.debug.print("State: {}\n", .{self.state});
     const isAcceptable = self.acceptable(segment);
 
     switch (self.state) {
@@ -258,11 +259,14 @@ pub fn handleSegment(
                 };
                 if (self.pending.?.get(id)) |_| return;
                 self.pending.?.put(id, segment.*) catch return;
+                self.sock.mutex.lock();
+                defer self.sock.mutex.unlock();
                 self.sock.events.read += 1;
+                self.sock.canread.signal();
+                return;
             }
         },
         .SYN_SENT => {
-            // std.debug.print("Received something on SYN-SENT\n", .{});
             if (segment.header.rsv_flags.fin) return;
             if (segment.header.rsv_flags.ack) {
                 const ack = bigToNative(u32, segment.header.ack);
@@ -302,7 +306,6 @@ pub fn handleSegment(
                         .ack = std.mem.nativeToBig(u32, self.context.recvNext),
                     });
                     self.transmit(&ack, "") catch {};
-                    // std.debug.print("Connected!\n", .{});
                     self.state = .ESTABLISHED;
                     self.changed.signal();
                 } else {
@@ -489,7 +492,10 @@ pub fn handleSegment(
                 if (segment.header.rsv_flags.psh or
                     segment.header.rsv_flags.fin)
                 {
+                    self.sock.mutex.lock();
+                    defer self.sock.mutex.unlock();
                     self.sock.events.read += 1;
+                    self.sock.canread.signal();
                 }
             }
 

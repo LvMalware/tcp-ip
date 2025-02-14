@@ -8,64 +8,61 @@ const ICMP4 = @import("icmp4.zig");
 const Socket = @import("socket.zig");
 const Ethernet = @import("ethernet.zig");
 
-pub fn clientLoop(allocator: std.mem.Allocator, tcp: *TCP) void {
-    defer std.debug.print("Client loop finished\n", .{});
-    var buffer: [1024]u8 = undefined;
-    var client = Socket.init(allocator, tcp);
-    defer client.deinit();
-    std.debug.print("Connecting...\n", .{});
-    client.connect("10.0.0.4", 5501) catch return;
-    while (client.state() == .ESTABLISHED) {
-        const size = client.read(buffer[0..]) catch return;
-        std.debug.print("[Client] Received: {s}\n", .{buffer[0..size]});
-        _ = client.write("Pong!") catch return;
-    }
-}
-
 pub fn serverLoop(allocator: std.mem.Allocator, tcp: *TCP) void {
-    defer std.debug.print("Server loop finished\n", .{});
     var server = Socket.init(allocator, tcp);
     defer server.deinit();
 
-    var clients = std.ArrayList(*Socket).init(allocator);
-    defer {
-        for (clients.items) |i| i.deinit();
-        clients.deinit();
-    }
     var buffer: [1024]u8 = undefined;
     server.listen("10.0.0.4", 5501) catch return;
     std.debug.print("Listenning...\n", .{});
+
     while (true) {
-        if (server.events.read > 0) {
-            std.debug.print("Accepted connection!\n", .{});
-            var client = server.accept() catch return;
+        var client = server.accept() catch continue;
+        defer client.deinit();
+        std.debug.print("Accepted connection!\n", .{});
 
-            clients.append(client) catch {
-                client.deinit();
-                return;
+        while (client.state() == .ESTABLISHED) {
+            const size = client.read(buffer[0..]) catch {
+                continue;
             };
-            std.time.sleep(1 * std.time.ns_per_s);
-            _ = client.write("Ping!") catch {};
-        }
-
-        for (clients.items) |c| {
-            if (c.events.read > 0) {
-                const size = c.read(buffer[0..]) catch {
-                    c.deinit();
-                    continue;
-                };
-                if (size == 0) {
-                    std.debug.print("Deinit client\n", .{});
-                    c.deinit();
-                    continue;
-                }
-                std.debug.print("[Server] Received: {s}\n", .{buffer[0..size]});
-                _ = c.write("Ping!") catch {
-                    c.deinit();
-                    continue;
-                };
+            if (size == 0) {
+                break;
             }
+            std.debug.print("[Server] Received: {s}\n", .{buffer[0..size]});
+            _ = client.write(buffer[0..size]) catch {};
         }
+    }
+}
+
+fn clientLoop(allocator: std.mem.Allocator, tcp: *TCP) void {
+    var buffer: [1024]u8 = undefined;
+
+    var client = Socket.init(allocator, tcp);
+    defer client.deinit();
+
+    std.debug.print("Connecting...\n", .{});
+    client.connect("10.0.0.1", 5501) catch |err| {
+        std.debug.print("Failed to connect: {s}\n", .{@errorName(err)});
+        return;
+    };
+    std.debug.print("Connected!\n", .{});
+    while (client.state() == .ESTABLISHED) {
+        const size = client.read(buffer[0..]) catch return;
+        if (size == 0) break;
+        std.debug.print("[Client] Received: {s}\n", .{buffer[0..size]});
+        _ = client.write(buffer[0..size]) catch return;
+    }
+    std.debug.print("Disconnected!\n", .{});
+}
+
+fn ethernetLoop(running: *std.atomic.Value(bool), eth: *Ethernet) void {
+    while (running.load(.acquire)) {
+        eth.readAndDispatch() catch |err| {
+            std.debug.print("[ETHERNET] Failed to read frame: {s}\n", .{
+                @errorName(err),
+            });
+            break;
+        };
     }
 }
 
@@ -97,15 +94,20 @@ pub fn main() !void {
     try ip.addProtocolHandler(.ICMP, icmp.handler());
     try ip.addProtocolHandler(.TCP, tcp.handler());
 
-    // try ip.send(null, 0x0100000a, .IP, "hello");
-    var server = try std.Thread.spawn(.{}, serverLoop, .{ allocator, &tcp });
-    defer server.join();
+    var running = std.atomic.Value(bool).init(true);
 
-    var client = try std.Thread.spawn(.{}, clientLoop, .{ allocator, &tcp });
-    defer client.join();
-
-    std.debug.print("[Ethernet] OK\n", .{});
-    while (true) {
-        try eth.readAndDispatch();
+    var thread = try std.Thread.spawn(.{}, ethernetLoop, .{ &running, &eth });
+    defer {
+        running.store(false, .release);
+        thread.join();
     }
+
+    const client: bool = findMode: {
+        var iter = std.process.args();
+        while (iter.next()) |arg| {
+            if (std.mem.eql(u8, arg, "client")) break :findMode true;
+        }
+        break :findMode false;
+    };
+    if (client) clientLoop(allocator, &tcp) else serverLoop(allocator, &tcp);
 }
