@@ -54,12 +54,8 @@ pub fn getData(self: *Self, buffer: []u8) !usize {
     defer self.mutex.unlock();
 
     while (self.contiguous_len < buffer.len and self.psh == 0) {
-        //std.debug.print("Blocking for {d} bytes, avail: {d} (PSH: {d})\n", .{ buffer.len, self.contiguous_len, self.psh });
         self.condition.wait(&self.mutex);
-        // std.debug.print("Unblocked!\n", .{});
     }
-    // TODO: block until there is either a contiguous block of buffer.len bytes
-    // or a contiguous block of data with a PSH
     var node = self.items.first;
     var last: usize = if (node) |f| f.data.seq else return error.NoData;
     var index: usize = 0;
@@ -71,16 +67,15 @@ pub fn getData(self: *Self, buffer: []u8) !usize {
             const diff = item.end - last;
             const data = item.data[item.data.len - diff ..];
             const size = if (avail > data.len) data.len else avail;
-            std.mem.copyForwards(u8, buffer[index..], item.data[0..size]);
+            std.mem.copyForwards(u8, buffer[index..], data[0..size]);
             index += size;
             last += size;
-            // TODO: add the size to seq and then ensure the whole data has
-            // been consumed before removing the segment
+            node.?.data.seq += size;
         } else if (item.seq > last) {
             return error.NonContiguousData;
         }
         if (item.psh) {
-            self.psh -= 1;
+            self.psh -= if (self.psh > 0) 1 else 0;
             break;
         }
         if (index == buffer.len) break;
