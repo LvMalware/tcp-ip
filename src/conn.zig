@@ -259,15 +259,14 @@ pub fn handleSegment(
         self.mutex.unlock();
     }
 
-    // std.debug.print("State: {}\n", .{self.state});
     const isAcceptable = self.acceptable(segment);
 
     switch (self.state) {
         .LISTEN => {
-            if (segment.header.rsv_flags.fin) return;
-            if (segment.header.rsv_flags.rst) {
+            if (segment.header.rsv_flags.fin or segment.header.rsv_flags.rst)
                 return;
-            } else if (segment.header.rsv_flags.ack) {
+
+            if (segment.header.rsv_flags.ack) {
                 var rst = TCP.segmentRST(&segment.header);
                 rst.csum = rst.checksum(
                     ip.saddr,
@@ -307,8 +306,8 @@ pub fn handleSegment(
                 defer self.sock.mutex.unlock();
                 self.sock.events.read += 1;
                 self.sock.canread.signal();
-                return;
             }
+            return;
         },
         .SYN_SENT => {
             if (segment.header.rsv_flags.fin) return;
@@ -365,18 +364,27 @@ pub fn handleSegment(
                     self.transmit(&ack, "") catch {};
                 }
             }
+            return;
         },
-        .SYN_RECEIVED => {
-            if (!isAcceptable) {
-                self.unacceptable(segment);
-                return;
-            }
-            if (segment.header.rsv_flags.rst or segment.header.rsv_flags.syn) {
-                self.state = .CLOSED;
-                self.changed.signal();
-                return;
-            }
+        .CLOSED => return,
+        else => {}, // other states will be handled next
+    }
 
+    if (!isAcceptable) {
+        self.unacceptable(segment);
+        return;
+    }
+    if (segment.header.rsv_flags.rst or segment.header.rsv_flags.syn) {
+        self.state = .CLOSED;
+        self.changed.signal();
+        return;
+    }
+
+    // all the following states share the same code above
+
+    switch (self.state) {
+        .CLOSING => {},
+        .SYN_RECEIVED => {
             if (segment.header.rsv_flags.ack) {
                 const ack = bigToNative(u32, segment.header.ack);
                 if (self.context.sendUnack <= ack and ack <= self.context.sendNext) {
@@ -393,32 +401,10 @@ pub fn handleSegment(
                 // TODO: allocate send_window
                 self.state = .ESTABLISHED;
                 self.changed.signal();
-                return;
             }
-        },
-        .CLOSED => return,
-        .CLOSING => {
-            if (!isAcceptable) {
-                self.unacceptable(segment);
-                return;
-            }
-            if (segment.header.rsv_flags.rst or segment.header.rsv_flags.syn) {
-                self.state = .CLOSED;
-                self.changed.signal();
-                return;
-            }
+            return;
         },
         .LAST_ACK => {
-            if (!isAcceptable) {
-                self.unacceptable(segment);
-                return;
-            }
-            if (segment.header.rsv_flags.rst or segment.header.rsv_flags.syn) {
-                self.state = .CLOSED;
-                self.changed.signal();
-                return;
-            }
-
             if (segment.header.rsv_flags.ack) {
                 self.state = .CLOSED;
                 self.changed.signal();
@@ -427,27 +413,8 @@ pub fn handleSegment(
         },
         .TIME_WAIT => {
             // TODO: start a timer to close the connection
-            if (!isAcceptable) {
-                self.unacceptable(segment);
-                return;
-            }
-            if (segment.header.rsv_flags.rst or segment.header.rsv_flags.syn) {
-                self.state = .CLOSED;
-                self.changed.signal();
-                return;
-            }
         },
         .FIN_WAIT1 => {
-            if (!isAcceptable) {
-                self.unacceptable(segment);
-                return;
-            }
-            if (segment.header.rsv_flags.rst or segment.header.rsv_flags.syn) {
-                self.state = .CLOSED;
-                self.changed.signal();
-                return;
-            }
-
             if (segment.header.rsv_flags.fin) {
                 self.state = .TIME_WAIT;
                 self.changed.signal();
@@ -457,15 +424,6 @@ pub fn handleSegment(
             }
         },
         .FIN_WAIT2 => {
-            if (!isAcceptable) {
-                self.unacceptable(segment);
-                return;
-            }
-            if (segment.header.rsv_flags.rst or segment.header.rsv_flags.syn) {
-                self.state = .CLOSED;
-                self.changed.signal();
-                return;
-            }
             if (segment.header.rsv_flags.ack) {
                 // "if the retransmission queue is empty, the user's CLOSE can
                 // be acknowledged ("ok") but do not delete the TCB."
@@ -476,28 +434,9 @@ pub fn handleSegment(
             }
         },
         .CLOSE_WAIT => {
-            if (!isAcceptable) {
-                self.unacceptable(segment);
-                return;
-            }
-            if (segment.header.rsv_flags.rst or segment.header.rsv_flags.syn) {
-                self.state = .CLOSED;
-                self.changed.signal();
-                return;
-            }
             // TODO: start a timer to finish connection
         },
         .ESTABLISHED => {
-            if (!isAcceptable) {
-                self.unacceptable(segment);
-                return;
-            }
-            if (segment.header.rsv_flags.rst or segment.header.rsv_flags.syn) {
-                self.state = .CLOSED;
-                self.changed.signal();
-                return;
-            }
-
             if (segment.header.rsv_flags.ack) {
                 const ack = bigToNative(u32, segment.header.ack);
                 const seq = bigToNative(u32, segment.header.seq);
@@ -570,5 +509,7 @@ pub fn handleSegment(
             }
             return;
         },
+        // all other states must have been handled previously
+        else => unreachable,
     }
 }
