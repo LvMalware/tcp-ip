@@ -383,7 +383,9 @@ pub fn handleSegment(
     // all the following states share the same code above
 
     switch (self.state) {
-        .CLOSING => {},
+        .CLOSING => {
+            // TODO
+        },
         .SYN_RECEIVED => {
             if (segment.header.rsv_flags.ack) {
                 const ack = bigToNative(u32, segment.header.ack);
@@ -398,7 +400,7 @@ pub fn handleSegment(
                 self.context.sendWinSeq = bigToNative(u32, segment.header.seq);
                 self.context.sendWinAck = bigToNative(u32, segment.header.ack);
                 self.context.sendWindow = bigToNative(u16, segment.header.window);
-                // TODO: allocate send_window
+                // TODO: allocate send_window ?
                 self.state = .ESTABLISHED;
                 self.changed.signal();
             }
@@ -433,10 +435,9 @@ pub fn handleSegment(
                 self.changed.signal();
             }
         },
-        .CLOSE_WAIT => {
-            // TODO: start a timer to finish connection
-        },
-        .ESTABLISHED => {
+        .CLOSE_WAIT, .ESTABLISHED => {
+            // TODO: most of the states above also share the code below, so
+            // maybe we can move it outisde the switch statement
             if (segment.header.rsv_flags.ack) {
                 const ack = bigToNative(u32, segment.header.ack);
                 const seq = bigToNative(u32, segment.header.seq);
