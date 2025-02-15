@@ -34,6 +34,11 @@ const Context = struct {
     recvWindow: u16 = default_window, // this host's recvWindow
 };
 
+const Incoming = struct {
+    id: Id,
+    header: TCP.Header,
+};
+
 pub const State = enum(u8) {
     CLOSED,
     LISTEN,
@@ -53,13 +58,15 @@ tcp: *TCP,
 sock: *Socket,
 mutex: std.Thread.Mutex,
 state: State = .CLOSED,
+backlog: usize,
 changed: std.Thread.Condition,
 context: Context,
-pending: ?std.AutoHashMap(Id, TCP.Segment),
+pending: std.TailQueue(Incoming),
 received: Sorted,
 allocator: std.mem.Allocator,
-send_buffer: []u8,
+// send_buffer: []u8,
 retransmission: Queue,
+// TODO: have a thread to retransmit packets...
 
 pub fn init(self: *Self, allocator: std.mem.Allocator, sock: *Socket) void {
     const iss = std.crypto.random.int(u32);
@@ -69,8 +76,9 @@ pub fn init(self: *Self, allocator: std.mem.Allocator, sock: *Socket) void {
         .tcp = sock.tcp,
         .sock = sock,
         .mutex = .{},
+        .backlog = 128,
         .changed = .{},
-        .pending = null,
+        .pending = .{},
         .context = .{
             .iss = iss,
             .sendNext = iss,
@@ -78,7 +86,7 @@ pub fn init(self: *Self, allocator: std.mem.Allocator, sock: *Socket) void {
         },
         .received = Sorted.init(allocator),
         .allocator = allocator,
-        .send_buffer = undefined,
+        // .send_buffer = undefined,
         .retransmission = Queue.init(allocator, 400 * std.time.ns_per_ms),
     };
 }
@@ -89,7 +97,9 @@ pub fn deinit(self: *Self) void {
     self.received.deinit();
     self.retransmission.deinit();
     self.tcp.removeConnection(self);
-    if (self.pending) |*pending| pending.deinit();
+    while (self.pending.pop()) |node| {
+        self.allocator.destroy(node);
+    }
     self.state = .CLOSED;
     self.changed.signal();
 }
@@ -126,7 +136,25 @@ pub fn transmit(self: *Self, seg: *TCP.Header, data: []const u8) !void {
     self.context.sendNext += @truncate(data.len);
 }
 
-pub fn setPassive(self: *Self, addr: u32, port: u16) !void {
+pub fn nextPending(self: *Self) ?Incoming {
+    self.mutex.lock();
+    defer self.mutex.unlock();
+    if (self.pending.popFirst()) |node| {
+        defer self.allocator.destroy(node);
+        return node.data;
+    }
+    return null;
+}
+
+fn hasPending(self: *Self, id: Id) bool {
+    var next = self.pending.first;
+    while (next != null) : (next = next.?.next) {
+        if (id.saddr == next.?.data.id.saddr and id.sport == next.?.data.id.sport) return true;
+    }
+    return false;
+}
+
+pub fn setPassive(self: *Self, addr: u32, port: u16, backlog: usize) !void {
     if (self.state != .CLOSED) return error.ConnectionReused;
     self.id = .{
         .daddr = addr,
@@ -134,7 +162,7 @@ pub fn setPassive(self: *Self, addr: u32, port: u16) !void {
     };
     self.state = .LISTEN;
     self.changed.signal();
-    self.pending = std.AutoHashMap(Id, TCP.Segment).init(self.allocator);
+    self.backlog = backlog;
     try self.tcp.addConnection(self);
 }
 
@@ -155,7 +183,11 @@ pub fn setActive(
     };
     self.state = state;
     self.changed.signal();
-    try self.tcp.addConnection(self);
+    self.tcp.addConnection(self) catch {
+        self.state = .CLOSED;
+        self.changed.signal();
+        return;
+    };
 }
 
 pub fn acceptable(self: Self, segment: *const TCP.Segment) bool {
@@ -257,8 +289,20 @@ pub fn handleSegment(
                     .daddr = ip.daddr,
                     .dport = segment.header.dport,
                 };
-                if (self.pending.?.get(id)) |_| return;
-                self.pending.?.put(id, segment.*) catch return;
+
+                if (self.hasPending(id) or self.pending.len == self.backlog) {
+                    return;
+                }
+
+                const node = self.allocator.create(
+                    std.TailQueue(Incoming).Node,
+                ) catch return;
+                node.data = .{
+                    .id = id,
+                    .header = segment.header,
+                };
+
+                self.pending.append(node);
                 self.sock.mutex.lock();
                 defer self.sock.mutex.unlock();
                 self.sock.events.read += 1;
@@ -287,7 +331,6 @@ pub fn handleSegment(
                 self.context.sendUnack = ack;
             }
             if (segment.header.rsv_flags.rst) {
-                //self.sock.close();
                 self.state = .CLOSED;
                 self.changed.signal();
                 return;
@@ -329,7 +372,8 @@ pub fn handleSegment(
                 return;
             }
             if (segment.header.rsv_flags.rst or segment.header.rsv_flags.syn) {
-                self.sock.close();
+                self.state = .CLOSED;
+                self.changed.signal();
                 return;
             }
 
@@ -359,7 +403,8 @@ pub fn handleSegment(
                 return;
             }
             if (segment.header.rsv_flags.rst or segment.header.rsv_flags.syn) {
-                self.sock.close();
+                self.state = .CLOSED;
+                self.changed.signal();
                 return;
             }
         },
@@ -369,12 +414,14 @@ pub fn handleSegment(
                 return;
             }
             if (segment.header.rsv_flags.rst or segment.header.rsv_flags.syn) {
-                self.sock.close();
+                self.state = .CLOSED;
+                self.changed.signal();
                 return;
             }
 
             if (segment.header.rsv_flags.ack) {
-                self.sock.close();
+                self.state = .CLOSED;
+                self.changed.signal();
                 return;
             }
         },
@@ -385,7 +432,8 @@ pub fn handleSegment(
                 return;
             }
             if (segment.header.rsv_flags.rst or segment.header.rsv_flags.syn) {
-                self.sock.close();
+                self.state = .CLOSED;
+                self.changed.signal();
                 return;
             }
         },
@@ -395,7 +443,8 @@ pub fn handleSegment(
                 return;
             }
             if (segment.header.rsv_flags.rst or segment.header.rsv_flags.syn) {
-                self.sock.close();
+                self.state = .CLOSED;
+                self.changed.signal();
                 return;
             }
 
@@ -413,7 +462,8 @@ pub fn handleSegment(
                 return;
             }
             if (segment.header.rsv_flags.rst or segment.header.rsv_flags.syn) {
-                self.sock.close();
+                self.state = .CLOSED;
+                self.changed.signal();
                 return;
             }
             if (segment.header.rsv_flags.ack) {
@@ -431,7 +481,8 @@ pub fn handleSegment(
                 return;
             }
             if (segment.header.rsv_flags.rst or segment.header.rsv_flags.syn) {
-                self.sock.close();
+                self.state = .CLOSED;
+                self.changed.signal();
                 return;
             }
             // TODO: start a timer to finish connection
@@ -442,7 +493,8 @@ pub fn handleSegment(
                 return;
             }
             if (segment.header.rsv_flags.rst or segment.header.rsv_flags.syn) {
-                self.sock.close();
+                self.state = .CLOSED;
+                self.changed.signal();
                 return;
             }
 
@@ -458,7 +510,6 @@ pub fn handleSegment(
                     std.debug.print("Warning: ACK is less than sendUnack!\n", .{});
                 } else if (self.context.sendUnack < ack) {
                     self.context.sendUnack = ack;
-                    // TODO: remove acked segments from retransmission queue
                     if (ack < self.context.sendNext and
                         (self.context.sendWinSeq < seq or
                         (self.context.sendWinSeq == seq and

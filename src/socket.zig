@@ -43,7 +43,6 @@ pub fn deinit(self: *Self) void {
 
 pub fn close(self: *Self) void {
     if (self.state() == .CLOSED) return;
-    std.debug.print("Closing connection!\n", .{});
     switch (self.state()) {
         .ESTABLISHED, .SYN_SENT => {
             // TODO: send FIN
@@ -55,13 +54,15 @@ pub fn close(self: *Self) void {
     }
 }
 
-fn _accepted(self: *Self, id: *const Connection.Id, seg: *const TCP.Segment) !void {
+fn _accepted(self: *Self, id: *const Connection.Id, header: *const TCP.Header) !void {
+    self.mutex.lock();
+    defer self.mutex.unlock();
     self.addr = id.saddr;
     self.port = id.sport;
     self.conn = try self.allocator.create(Connection);
     if (self.conn) |conn| {
         conn.init(self.allocator, self);
-        conn.context.irs = std.mem.bigToNative(u32, seg.header.seq);
+        conn.context.irs = std.mem.bigToNative(u32, header.seq);
         conn.context.recvNext = conn.context.irs + 1;
         try conn.setActive(
             .SYN_RECEIVED,
@@ -82,6 +83,14 @@ fn _accepted(self: *Self, id: *const Connection.Id, seg: *const TCP.Segment) !vo
         try conn.transmit(&ack, "");
         // after transmiting the SYN-ACK, we increment SND.NXT by 1
         conn.context.sendNext += 1;
+        // wait for ACK to establish connection
+        while (conn.state == .SYN_RECEIVED) {
+            conn.changed.wait(&self.mutex);
+        }
+
+        if (conn.state == .CLOSED) {
+            return error.AcceptFailed;
+        }
     }
 }
 
@@ -94,20 +103,15 @@ pub fn accept(self: *Self) !*Self {
         self.canread.wait(&self.mutex);
     }
 
-    var entries = self.conn.?.pending.?.iterator();
-    if (entries.next()) |kv| {
+    if (self.conn.?.nextPending()) |pending| {
         defer self.events.read -= 1;
         var client = try self.allocator.create(Self);
         client.* = Self.init(self.allocator, self.tcp);
-        errdefer |err| {
+        errdefer {
             client.deinit();
             self.allocator.destroy(client);
-            std.debug.print("Error: {}\n", .{err});
-            // for debug only:
-            unreachable;
         }
-        try client._accepted(kv.key_ptr, kv.value_ptr);
-        _ = self.conn.?.pending.?.remove(kv.key_ptr.*);
+        try client._accepted(&pending.id, &pending.header);
         return client;
     }
     return error.NotPending;
@@ -159,13 +163,15 @@ pub fn state(self: Self) Connection.State {
     return if (self.conn) |conn| conn.state else .CLOSED;
 }
 
-pub fn listen(self: *Self, host: []const u8, port: u16) !void {
+pub fn listen(self: *Self, host: []const u8, port: u16, backlog: usize) !void {
     if (self.conn) |_| return error.ConnectionReuse;
     self.addr = try Utils.pton(host);
     self.port = std.mem.nativeToBig(u16, port);
     self.conn = try self.allocator.create(Connection);
-    self.conn.?.init(self.allocator, self);
-    try self.conn.?.setPassive(self.addr, self.port);
+    if (self.conn) |conn| {
+        conn.init(self.allocator, self);
+        try conn.setPassive(self.addr, self.port, backlog);
+    }
 }
 
 pub fn read(self: *Self, buffer: []u8) !usize {

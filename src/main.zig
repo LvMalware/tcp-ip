@@ -13,7 +13,7 @@ pub fn serverLoop(allocator: std.mem.Allocator, tcp: *TCP) void {
     defer server.deinit();
 
     var buffer: [1024]u8 = undefined;
-    server.listen("10.0.0.4", 5501) catch return;
+    server.listen("10.0.0.4", 5501, 1) catch return;
     std.debug.print("Listenning...\n", .{});
 
     while (true) {

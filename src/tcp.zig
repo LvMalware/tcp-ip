@@ -216,17 +216,20 @@ pub fn handle(self: *Self, packet: *const IPv4.Packet) void {
     };
 
     if (self.connections.get(id)) |conn| {
+        std.debug.print("Delivering packet to active connection\n", .{});
         conn.handleSegment(&packet.header, &segment);
         return;
     } else if (self.listenning.get(.{
         .dport = segment.header.dport,
         .daddr = packet.header.daddr,
     })) |conn| {
+        std.debug.print("Delivering packet to passive connection\n", .{});
         if (segment.header.rsv_flags.syn) {
             conn.handleSegment(&packet.header, &segment);
         }
         return;
     }
+    std.debug.print("Discarding packet with RST\n", .{});
 
     // "If the state is CLOSED (i.e., TCB does not exist) then all data in the
     // incoming segment is discarded."
