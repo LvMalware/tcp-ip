@@ -87,7 +87,10 @@ pub fn init(self: *Self, allocator: std.mem.Allocator, sock: *Socket) void {
         .received = Sorted.init(allocator),
         .allocator = allocator,
         // .send_buffer = undefined,
-        .retransmission = Queue.init(allocator, 400 * std.time.ns_per_ms),
+        .retransmission = Queue.init(
+            allocator,
+            sock.tcp.rto * std.time.ns_per_ms,
+        ),
     };
 }
 
@@ -105,7 +108,7 @@ pub fn deinit(self: *Self) void {
 }
 
 pub fn retransmit(self: *Self) !void {
-    if (self.retransmission.next()) |next| {
+    while (self.retransmission.next()) |next| {
         try self.tcp.ip.send(null, self.id.saddr, .TCP, next);
     }
 }

@@ -83,8 +83,10 @@ pub fn main() !void {
     var ip = IPv4.init(allocator, &arp, &eth);
     defer ip.deinit();
 
-    var tcp = TCP.init(allocator, &ip);
+    var tcp = TCP.init(allocator, &ip, 400);
     defer tcp.deinit();
+
+    try tcp.start();
 
     var icmp = ICMP4.init(allocator, &ip);
     defer icmp.deinit();

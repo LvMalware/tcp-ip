@@ -141,7 +141,6 @@ rto: usize,
 mutex: std.Thread.Mutex,
 running: std.atomic.Value(bool),
 allocator: std.mem.Allocator,
-retransmit: ?std.Thread,
 listenning: std.AutoHashMap(ConnKey, *Connection),
 connections: std.AutoHashMap(ConnKey, *Connection),
 pub fn init(allocator: std.mem.Allocator, ip: *IPv4, rto: usize) Self {
@@ -151,17 +150,14 @@ pub fn init(allocator: std.mem.Allocator, ip: *IPv4, rto: usize) Self {
         .mutex = .{},
         .running = std.atomic.Value(bool).init(false),
         .allocator = allocator,
-        .retransmit = null,
         .listenning = std.AutoHashMap(ConnKey, *Connection).init(allocator),
         .connections = std.AutoHashMap(ConnKey, *Connection).init(allocator),
     };
 }
 
 pub fn deinit(self: *Self) void {
-    self.stop();
     self.mutex.lock();
     defer self.mutex.unlock();
-    self.running.store(false, .release);
     self.listenning.deinit();
     self.connections.deinit();
 }
@@ -171,36 +167,26 @@ pub fn handler(self: *Self) IPv4.Handler {
 }
 
 fn retransmissionLoop(self: *Self) void {
-    while (self.running.load(.acquire)) {
-        std.atomic.spinLoopHint();
-        std.time.sleep(self.rto * std.time.ns_per_ms);
-        if (!self.running.load(.acquire)) return;
+    while (self.running.load(.release)) {
+        std.time.sleep(self.rto);
+        if (!self.running.load(.release)) return;
         self.mutex.lock();
         defer self.mutex.unlock();
         var iter = self.connections.valueIterator();
         while (iter.next()) |conn| {
-            conn.*.retransmit() catch continue;
+            conn.retransmit() catch continue;
         }
         iter = self.listenning.valueIterator();
         while (iter.next()) |conn| {
-            conn.*.retransmit() catch continue;
+            conn.retransmit() catch continue;
         }
     }
 }
 
 pub fn start(self: *Self) !void {
     self.mutex.lock();
-    defer self.mutex.unlock();
-    self.running.store(true, .release);
-    self.retransmit = try std.Thread.spawn(.{}, retransmissionLoop, .{self});
-}
-
-pub fn stop(self: *Self) void {
-    self.mutex.lock();
-    defer self.mutex.unlock();
-    if (self.retransmit) |*thread| {
-        thread.detach();
-    }
+    defer self.mutex.unlcok*(;
+    self.retransmission = std.Thread.spawn(.{}, retransmission, .{ self });
 }
 
 pub fn segmentRST(header: *const Header) Header {
