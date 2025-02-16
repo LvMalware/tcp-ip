@@ -113,6 +113,21 @@ pub fn retransmit(self: *Self) !void {
     }
 }
 
+pub fn waitForState(self: *Self, state: State, timeout: usize) void {
+    self.mutex.lock();
+    defer self.mutex.unlock();
+    while (self.state != state) {
+        try self.changed.timedWait(&self.mutex, timeout);
+    }
+}
+
+pub fn waitChange(self: *Self, timeout: isize) !State {
+    self.mutex.lock();
+    defer self.mutex.unlock();
+    try self.changed.timedWait(&self.mutex, @bitCast(timeout));
+    return self.state;
+}
+
 pub fn transmit(self: *Self, seg: *TCP.Header, data: []const u8) !void {
     seg.csum = 0;
     seg.seq = nativeToBig(u32, self.context.sendNext);

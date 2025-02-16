@@ -84,13 +84,7 @@ fn _accepted(self: *Self, id: *const Connection.Id, header: *const TCP.Header) !
         // after transmiting the SYN-ACK, we increment SND.NXT by 1
         conn.context.sendNext += 1;
         // wait for ACK to establish connection
-        while (conn.state == .SYN_RECEIVED) {
-            conn.changed.wait(&self.mutex);
-        }
-
-        if (conn.state == .CLOSED) {
-            return error.AcceptFailed;
-        }
+        if (try conn.waitChange(-1) == .CLOSED) return error.AcceptFailed;
     }
 }
 
@@ -149,10 +143,7 @@ pub fn connect(self: *Self, host: []const u8, port: u16) !void {
         try conn.transmit(&ack, "");
         conn.context.sendNext += 1;
 
-        while (conn.state == .SYN_SENT) {
-            conn.changed.wait(&self.mutex);
-        }
-        if (conn.state == .CLOSED) {
+        if (try conn.waitChange(-1) == .CLOSED) {
             self.deinit();
             return error.ConnectionRefused;
         }
