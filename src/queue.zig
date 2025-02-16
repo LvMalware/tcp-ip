@@ -19,7 +19,7 @@ allocator: std.mem.Allocator,
 
 pub fn init(allocator: std.mem.Allocator, rtt: usize) Self {
     return .{
-        .rto = rtt + 100 * std.time.ns_per_ms,
+        .rto = (rtt + 100) * std.time.ns_per_ms,
         .items = .{},
         .mutex = .{},
         .allocator = allocator,

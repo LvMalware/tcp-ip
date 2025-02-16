@@ -81,10 +81,9 @@ fn _accepted(self: *Self, id: *const Connection.Id, header: *const TCP.Header) !
         });
 
         try conn.transmit(&ack, "");
-        // after transmiting the SYN-ACK, we increment SND.NXT by 1
-        conn.context.sendNext += 1;
         // wait for ACK to establish connection
-        if (try conn.waitChange(-1) == .CLOSED) return error.AcceptFailed;
+        if (try conn.waitChange(.SYN_RECEIVED, -1) == .CLOSED)
+            return error.AcceptFailed;
     }
 }
 
@@ -141,10 +140,10 @@ pub fn connect(self: *Self, host: []const u8, port: u16) !void {
         });
 
         try conn.transmit(&ack, "");
-        conn.context.sendNext += 1;
+        // conn.context.sendNext += 1;
 
-        if (try conn.waitChange(-1) == .CLOSED) {
-            self.deinit();
+        if (try conn.waitChange(.SYN_SENT, -1) == .CLOSED) {
+            std.debug.print("Closed\n", .{});
             return error.ConnectionRefused;
         }
     }
@@ -171,6 +170,7 @@ pub fn read(self: *Self, buffer: []u8) !usize {
 }
 
 pub fn write(self: *Self, buffer: []const u8) !usize {
+    if (self.state() == .CLOSED) return error.NotConnected;
     // TODO: block if events.write is 0
     // TODO: add to outgoing buffer instead of sending right away
     var hdr = std.mem.zeroInit(TCP.Header, .{

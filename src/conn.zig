@@ -113,17 +113,10 @@ pub fn retransmit(self: *Self) !void {
     }
 }
 
-pub fn waitForState(self: *Self, state: State, timeout: usize) void {
+pub fn waitChange(self: *Self, state: State, timeout: isize) !State {
     self.mutex.lock();
     defer self.mutex.unlock();
-    while (self.state != state) {
-        try self.changed.timedWait(&self.mutex, timeout);
-    }
-}
-
-pub fn waitChange(self: *Self, timeout: isize) !State {
-    self.mutex.lock();
-    defer self.mutex.unlock();
+    if (self.state != state) return self.state;
     try self.changed.timedWait(&self.mutex, @bitCast(timeout));
     return self.state;
 }
@@ -148,10 +141,15 @@ pub fn transmit(self: *Self, seg: *TCP.Header, data: []const u8) !void {
     std.mem.copyForwards(u8, buffer[0..], std.mem.asBytes(seg));
     std.mem.copyForwards(u8, buffer[seg.dataOffset()..], data);
 
-    try self.tcp.ip.send(null, self.id.saddr, .TCP, buffer);
+    if (seg.rsv_flags.syn and data.len == 0) {
+        // after transmiting SYN (or SYN-ACK), we increment SND.NXT by 1
+        self.context.sendNext += 1;
+    } else {
+        // only increment snd.nxt by the amount of data sent
+        self.context.sendNext += @truncate(data.len);
+    }
 
-    // only increment snd.nxt by the amount of data sent
-    self.context.sendNext += @truncate(data.len);
+    try self.tcp.ip.send(null, self.id.saddr, .TCP, buffer);
 }
 
 pub fn nextPending(self: *Self) ?Incoming {
