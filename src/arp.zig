@@ -15,6 +15,7 @@ const Cached = struct {
     smac: [6]u8,
     saddr: u32,
     state: CacheState = .free,
+    resolved: std.Thread.Condition,
 };
 
 const Opcode = enum(u16) {
@@ -60,12 +61,14 @@ pub const vtable = Ethernet.Handler.VTable{
     .handle = vhandle,
 };
 
+mutex: std.Thread.Mutex,
 cache: std.ArrayList(Cached),
 ethernet: *Ethernet,
 allocator: std.mem.Allocator,
 
 pub fn init(allocator: std.mem.Allocator, eth: *Ethernet) Self {
     return .{
+        .mutex = .{},
         .cache = std.ArrayList(Cached).init(allocator),
         .ethernet = eth,
         .allocator = allocator,
@@ -115,6 +118,8 @@ fn macfmt(m: [6]u8) [17]u8 {
 }
 
 fn merge(self: *Self, packet: *const Header, arp: *const ARPIPv4) bool {
+    self.mutex.lock();
+    defer self.mutex.unlock();
     const hwtype = HWType.fromInt(packet.hwtype) catch unreachable;
     for (self.cache.items) |*cached| {
         if (cached.hwtype == hwtype and arp.saddr == cached.saddr) {
@@ -126,14 +131,17 @@ fn merge(self: *Self, packet: *const Header, arp: *const ARPIPv4) bool {
 }
 
 pub fn insertEntry(self: *Self, packet: *const Header, arp: *const ARPIPv4) void {
+    self.mutex.lock();
+    defer self.mutex.unlock();
     var entry: Cached = .{
         .smac = undefined,
         .state = .resolved,
         .saddr = arp.saddr,
         .hwtype = HWType.fromInt(packet.hwtype) catch unreachable,
+        .resolved = .{},
     };
     std.mem.copyForwards(u8, entry.smac[0..], arp.smac[0..]);
-    self.cache.append(entry) catch {};
+    self.cache.append(entry) catch return;
 }
 
 pub fn request(self: Self, addr: u32) !void {
@@ -171,43 +179,32 @@ pub fn request(self: Self, addr: u32) !void {
     try self.ethernet.transmit(buffer, Ethernet.BroadcastAddress, .arp);
 }
 
-pub fn resolve(self: *Self, addr: u32) ![6]u8 {
+pub fn resolve(self: *Self, addr: u32, timeout: isize) ![6]u8 {
+    self.mutex.lock();
+    defer self.mutex.unlock();
     if (addr == self.ethernet.dev.ipaddr) return self.ethernet.dev.hwaddr;
-    for (self.cache.items) |i| {
+    for (self.cache.items) |*i| {
         if (i.saddr != addr) {
             continue;
         } else if (i.state == .waiting) {
-            return error.WaitingResolve;
+            try i.resolved.timedWait(&self.mutex, @bitCast(timeout));
+            return i.smac;
         } else {
             return i.smac;
         }
     }
-    // TODO: prepare for concurrent scenario
+
     try self.cache.append(.{
         .smac = undefined,
         .saddr = addr,
         .state = .waiting,
         .hwtype = .Ethernet,
+        .resolved = .{},
     });
     try self.request(addr);
-    return error.WaitingResolve;
-}
-
-pub fn resolveWait(self: *Self, addr: u32) ![6]u8 {
-    // TODO: This might get us in trouble later
-    while (true) {
-        const mac = self.resolve(addr) catch |err| switch (err) {
-            error.WaitingResolve => {
-                // Hacky "asyncronous" operations. We just keep dispatching
-                // new events until the ARP response arrives
-                try self.ethernet.readAndDispatch();
-                continue;
-            },
-            else => return err,
-        };
-        return mac;
-    }
-    return error.Unknown;
+    const entry = &self.cache.items[self.cache.items.len - 1];
+    try entry.resolved.timedWait(&self.mutex, @bitCast(timeout));
+    return entry.smac;
 }
 
 pub fn reply(self: Self, packet: *const Header, arp: *const ARPIPv4) !void {
@@ -280,14 +277,21 @@ pub fn handle(self: *Self, frame: *const Ethernet.Frame) void {
                 ARPIPv4,
                 frame.data[@sizeOf(Header)..][0..@sizeOf(ARPIPv4)],
             );
+
             std.debug.print("[ARP] {s} is at {s}\n", .{
                 ipv4fmt(ipv4.saddr),
                 macfmt(ipv4.smac),
             });
+
+            self.mutex.lock();
+            defer self.mutex.unlock();
+
+            // TODO: use a HashMap(addr, mac) instead of ArrayList
             for (self.cache.items) |*entry| {
                 if (entry.saddr == ipv4.saddr) {
                     std.mem.copyForwards(u8, entry.smac[0..], ipv4.smac[0..]);
                     entry.state = .resolved;
+                    entry.resolved.signal();
                 }
             }
         },

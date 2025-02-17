@@ -16,21 +16,19 @@ pub fn serverLoop(allocator: std.mem.Allocator, tcp: *TCP) void {
     server.listen("10.0.0.4", 5501, 1) catch return;
     std.debug.print("Listenning...\n", .{});
 
-    while (true) {
-        var client = server.accept() catch continue;
-        defer client.deinit();
-        std.debug.print("Accepted connection!\n", .{});
+    var client = server.accept() catch return;
+    defer client.deinit();
+    std.debug.print("Accepted connection!\n", .{});
 
-        while (client.state() == .ESTABLISHED) {
-            const size = client.read(buffer[0..]) catch {
-                continue;
-            };
-            if (size == 0) {
-                break;
-            }
-            std.debug.print("[Server] Received: {s}\n", .{buffer[0..size]});
-            _ = client.write(buffer[0..size]) catch {};
+    while (client.state() == .ESTABLISHED) {
+        const size = client.read(buffer[0..]) catch {
+            continue;
+        };
+        if (size == 0) {
+            break;
         }
+        std.debug.print("[Server] Received: {s}\n", .{buffer[0..size]});
+        _ = client.write(buffer[0..size]) catch {};
     }
 }
 
@@ -93,6 +91,7 @@ pub fn main() !void {
 
     try eth.addProtocolHandler(.ip4, ip.handler());
     try eth.addProtocolHandler(.arp, arp.handler());
+
     try ip.addProtocolHandler(.ICMP, icmp.handler());
     try ip.addProtocolHandler(.TCP, tcp.handler());
 
