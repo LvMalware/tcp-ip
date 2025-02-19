@@ -2,6 +2,7 @@ const std = @import("std");
 const native_endian = @import("builtin").target.cpu.arch.endian();
 
 const IPv4 = @import("ipv4.zig");
+const Options = @import("options.zig");
 const Connection = @import("conn.zig");
 const ConnKey = Connection.Id;
 
@@ -118,7 +119,7 @@ pub const Header = extern struct {
 
 pub const Segment = struct {
     header: Header,
-    // options: ?[]Options,
+    options: ?[]Options.Option,
     data: []const u8,
 
     pub fn fromPacket(packet: *const IPv4.Packet) !Segment {
@@ -129,8 +130,28 @@ pub const Segment = struct {
             packet.data,
         ) != 0) return error.BadChecksum;
         const header = Header.fromBytes(packet.data);
+
+        var index: usize = @sizeOf(Header);
+        while (index < header.dataOffset()) {
+            const option = Options.Option.fromBytes(packet.data[index..]) catch break;
+            std.debug.print("{}\n", .{option});
+            switch (option) {
+                .MSS => |mss| {
+                    std.debug.print("Maximum Segment Size: {d}\n", .{mss.data});
+                },
+                .NOP => {},
+                .END => break,
+                .WINDOW_SCALE => |win| {
+                    std.debug.print("Window scale: {d}\n", .{win.data});
+                },
+                else => {},
+            }
+            index += option.size();
+        }
+
         return .{
             .header = header,
+            .options = null,
             .data = packet.data[header.dataOffset()..],
         };
     }

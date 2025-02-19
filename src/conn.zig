@@ -122,6 +122,10 @@ pub fn waitChange(self: *Self, state: State, timeout: isize) !State {
 }
 
 pub fn transmit(self: *Self, seg: *TCP.Header, data: []const u8) !void {
+    // TODO: handle MSS
+    const usable = self.context.sendUnack + self.context.sendWindow - self.context.sendNext;
+    if (data.len > usable) return error.DoesNotFitWindow;
+
     seg.csum = 0;
     seg.seq = nativeToBig(u32, self.context.sendNext);
     seg.sport = self.id.dport;
