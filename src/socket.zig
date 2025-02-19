@@ -3,6 +3,7 @@ const std = @import("std");
 const TCP = @import("tcp.zig");
 const IPv4 = @import("ipv4.zig");
 const Utils = @import("utils.zig");
+const Options = @import("options.zig");
 const Connection = @import("conn.zig");
 
 const Self = @This();
@@ -147,6 +148,11 @@ pub fn connect(self: *Self, host: []const u8, port: u16) !void {
             return error.ConnectionRefused;
         }
     }
+}
+
+pub fn setOption(self: *Self, kind: Options.Kind, value: Options.Option) void {
+    // TODO:
+    _ = .{ self, kind, value };
 }
 
 pub fn state(self: Self) Connection.State {

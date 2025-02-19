@@ -9,7 +9,10 @@ pub const Kind = enum(u8) {
     SACK_PERMITTED = 4, // selective acknowledgement (RFC 2018)
     SACK = 5,
     pub fn fromInt(val: u8) !Kind {
-        return std.meta.intToEnum(Kind, val) catch return error.UnknownOption;
+        return std.meta.intToEnum(Kind, val) catch {
+            std.debug.print("[OPTIONS] Failed to convert {d} as option kind\n", .{val});
+            return error.UnknownOption;
+        };
     }
 };
 
