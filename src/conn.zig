@@ -238,10 +238,13 @@ pub fn unacceptable(self: *Self, segment: *const TCP.Segment) void {
 }
 
 pub fn acknowledge(self: *Self, seg: *const TCP.Segment, data: []const u8) void {
-    const seq = bigToNative(u32, seg.header.seq) + if (seg.data.len > 0)
+    const segEnd = bigToNative(u32, seg.header.seq) + if (seg.data.len > 0)
         seg.data.len
     else
         1;
+
+    const seq = self.received.ackable() orelse segEnd;
+
     if (seq > self.context.recvNext) self.context.recvNext = @truncate(seq);
     var ack = std.mem.zeroInit(TCP.Header, .{
         .ack = nativeToBig(u32, @truncate(seq)),

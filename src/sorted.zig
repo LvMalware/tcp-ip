@@ -143,6 +143,12 @@ fn checkContiguous(self: *Self, node: *List.Node) void {
     }
 }
 
+pub fn ackable(self: *Self) ?usize {
+    self.mutex.lock();
+    defer self.mutex.unlock();
+    return self.last_cont;
+}
+
 pub fn insert(self: *Self, seq: usize, data: []const u8, psh: bool) !void {
     self.mutex.lock();
     defer self.mutex.unlock();
