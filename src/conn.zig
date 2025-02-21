@@ -8,6 +8,7 @@ const IPv4 = @import("ipv4.zig");
 const Queue = @import("queue.zig");
 const Socket = @import("socket.zig");
 const Sorted = @import("sorted.zig");
+const Option = @import("options.zig").Option;
 
 const Self = @This();
 
@@ -23,6 +24,7 @@ pub const Id = struct {
 const Context = struct {
     irs: u32 = 0,
     iss: u32 = 0,
+    mss: u16 = 1460, // maximum segment size
     sendNext: u32 = 0, // sequence id of next segment to be sent
     recvNext: u32 = 0, // sequence id of next segment to be received
     sendUnack: u32 = 0, // oldest unacknowledged segment
@@ -37,6 +39,7 @@ const Context = struct {
 const Incoming = struct {
     id: Id,
     header: TCP.Header,
+    options: []Option,
 };
 
 pub const State = enum(u8) {
@@ -98,9 +101,10 @@ pub fn deinit(self: *Self) void {
     self.mutex.lock();
     defer self.mutex.unlock();
     self.received.deinit();
-    self.retransmission.deinit();
     self.tcp.removeConnection(self);
+    self.retransmission.deinit();
     while (self.pending.pop()) |node| {
+        self.allocator.free(node.data.options);
         self.allocator.destroy(node);
     }
     self.state = .CLOSED;
@@ -164,12 +168,42 @@ pub fn nextPending(self: *Self) ?Incoming {
     return null;
 }
 
-fn hasPending(self: *Self, id: Id) bool {
+fn addPending(
+    self: *Self,
+    ip: *const IPv4.Header,
+    seg: *const TCP.Segment,
+) !void {
     var next = self.pending.first;
     while (next != null) : (next = next.?.next) {
-        if (id.saddr == next.?.data.id.saddr and id.sport == next.?.data.id.sport) return true;
+        if (ip.saddr == next.?.data.id.saddr and
+            seg.header.sport == next.?.data.id.sport) return;
     }
-    return false;
+
+    const node = self.allocator.create(
+        std.TailQueue(Incoming).Node,
+    ) catch return;
+
+    node.data = .{
+        .id = .{
+            .saddr = ip.saddr,
+            .sport = seg.header.sport,
+            .daddr = ip.daddr,
+            .dport = seg.header.dport,
+        },
+        .header = seg.header,
+        .options = self.allocator.dupe(Option, seg.options) catch {
+            self.allocator.destroy(node);
+            return;
+        },
+    };
+
+    self.pending.append(node);
+
+    self.sock.mutex.lock();
+    defer self.sock.mutex.unlock();
+
+    self.sock.events.read += 1;
+    self.sock.canread.signal();
 }
 
 pub fn setPassive(self: *Self, addr: u32, port: u16, backlog: usize) !void {
@@ -243,9 +277,13 @@ pub fn acknowledge(self: *Self, seg: *const TCP.Segment, data: []const u8) void 
     else
         1;
 
-    const seq = self.received.ackable() orelse segEnd;
+    var seq = self.received.ackable() orelse segEnd;
 
     if (seq > self.context.recvNext) self.context.recvNext = @truncate(seq);
+
+    // ensure the right ACK sequence for FIN
+    if (seg.header.rsv_flags.fin and seg.data.len == 0) seq += 1;
+
     var ack = std.mem.zeroInit(TCP.Header, .{
         .ack = nativeToBig(u32, @truncate(seq)),
         .rsv_flags = .{
@@ -303,31 +341,8 @@ pub fn handleSegment(
                 ) catch {};
             } else if (segment.header.rsv_flags.syn) {
                 // TODO: check security and precedence
-                const id = Id{
-                    .saddr = ip.saddr,
-                    .sport = segment.header.sport,
-                    .daddr = ip.daddr,
-                    .dport = segment.header.dport,
-                };
 
-                if (self.hasPending(id) or self.pending.len == self.backlog) {
-                    return;
-                }
-
-                const node = self.allocator.create(
-                    std.TailQueue(Incoming).Node,
-                ) catch return;
-                node.data = .{
-                    .id = id,
-                    // TODO: add options
-                    .header = segment.header,
-                };
-
-                self.pending.append(node);
-                self.sock.mutex.lock();
-                defer self.sock.mutex.unlock();
-                self.sock.events.read += 1;
-                self.sock.canread.signal();
+                self.addPending(ip, segment) catch {};
             }
             return;
         },
