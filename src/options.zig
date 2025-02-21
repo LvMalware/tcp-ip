@@ -10,7 +10,7 @@ pub const Kind = enum(u8) {
     SACK = 5,
     pub fn fromInt(val: u8) !Kind {
         return std.meta.intToEnum(Kind, val) catch {
-            std.debug.print("[OPTIONS] Failed to convert {d} as option kind\n", .{val});
+            std.debug.print("[OPTIONS] Unknown option kind: {d}\n", .{val});
             return error.UnknownOption;
         };
     }

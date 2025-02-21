@@ -2,7 +2,7 @@ const std = @import("std");
 const native_endian = @import("builtin").target.cpu.arch.endian();
 
 const IPv4 = @import("ipv4.zig");
-const Options = @import("options.zig");
+const Option = @import("options.zig").Option;
 const Connection = @import("conn.zig");
 const ConnKey = Connection.Id;
 
@@ -119,10 +119,13 @@ pub const Header = extern struct {
 
 pub const Segment = struct {
     header: Header,
-    options: ?[]Options.Option,
+    options: []Option,
     data: []const u8,
 
-    pub fn fromPacket(packet: *const IPv4.Packet) !Segment {
+    pub fn fromPacket(
+        allocator: std.mem.Allocator,
+        packet: *const IPv4.Packet,
+    ) !Segment {
         if (tcpChecksum(
             packet.header.saddr,
             packet.header.daddr,
@@ -131,29 +134,37 @@ pub const Segment = struct {
         ) != 0) return error.BadChecksum;
         const header = Header.fromBytes(packet.data);
 
+        var options = std.ArrayList(Option).init(allocator);
+        defer options.deinit();
+
         var index: usize = @sizeOf(Header);
         while (index < header.dataOffset()) {
-            const option = Options.Option.fromBytes(packet.data[index..]) catch break;
-            std.debug.print("{}\n", .{option});
-            switch (option) {
-                .MSS => |mss| {
-                    std.debug.print("Maximum Segment Size: {d}\n", .{mss.data});
-                },
-                .NOP => {},
-                .END => break,
-                .WINDOW_SCALE => |win| {
-                    std.debug.print("Window scale: {d}\n", .{win.data});
-                },
-                else => {},
-            }
+            const option = Option.fromBytes(packet.data[index..]) catch break;
+            // switch (option) {
+            //     .MSS => |mss| {
+            //         std.debug.print("Maximum Segment Size: {d}\n", .{mss.data});
+            //     },
+            //     .NOP => {},
+            //     .END => break,
+            //     .WINDOW_SCALE => |win| {
+            //         std.debug.print("Window scale: {d}\n", .{win.data});
+            //     },
+            //     else => {},
+            // }
+            try options.append(option);
             index += option.size();
+            if (option == .END) break;
         }
 
         return .{
             .header = header,
-            .options = null,
+            .options = try allocator.dupe(Option, options.items),
             .data = packet.data[header.dataOffset()..],
         };
+    }
+
+    pub fn deinit(self: Segment, allocator: std.mem.Allocator) void {
+        allocator.free(self.options);
     }
 };
 
@@ -266,10 +277,12 @@ pub fn removeConnection(self: *Self, conn: *Connection) void {
 pub fn handle(self: *Self, packet: *const IPv4.Packet) void {
     self.mutex.lock();
     defer self.mutex.unlock();
-    const segment = Segment.fromPacket(packet) catch |err| {
+    const segment = Segment.fromPacket(self.allocator, packet) catch |err| {
         std.debug.print("[TCP] Discarding packet with error {}\n", .{err});
         return;
     };
+
+    defer segment.deinit(self.allocator);
 
     std.debug.print("[TCP] SEQ={d}, ACK={d}, LEN={d}, SYN={}, ACK={}, FIN={}, RST={}\n", .{
         std.mem.bigToNative(u32, segment.header.seq),

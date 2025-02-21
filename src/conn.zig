@@ -319,6 +319,7 @@ pub fn handleSegment(
                 ) catch return;
                 node.data = .{
                     .id = id,
+                    // TODO: add options
                     .header = segment.header,
                 };
 
