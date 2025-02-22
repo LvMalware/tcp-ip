@@ -55,33 +55,29 @@ pub fn close(self: *Self) void {
     }
 }
 
-fn _accepted(self: *Self, id: *const Connection.Id, header: *const TCP.Header) !void {
+fn _accepted(self: *Self, pending: *const Connection.Incoming) !void {
     self.mutex.lock();
     defer self.mutex.unlock();
-    self.addr = id.saddr;
-    self.port = id.sport;
+    self.addr = pending.id.saddr;
+    self.port = pending.id.sport;
     self.conn = try self.allocator.create(Connection);
     if (self.conn) |conn| {
         conn.init(self.allocator, self);
-        conn.context.irs = std.mem.bigToNative(u32, header.seq);
+        conn.context.irs = std.mem.bigToNative(u32, pending.header.seq);
         conn.context.recvNext = conn.context.irs + 1;
         try conn.setActive(
             .SYN_RECEIVED,
-            id.saddr,
-            id.sport,
-            id.daddr,
-            id.dport,
+            pending.id.saddr,
+            pending.id.sport,
+            pending.id.daddr,
+            pending.id.dport,
         );
-        var ack: TCP.Header = std.mem.zeroInit(TCP.Header, .{
-            .rsv_flags = .{
-                .doff = @as(u4, @truncate(@sizeOf(TCP.Header) / 4)),
-                .ack = true,
-                .syn = true,
-            },
-            .ack = std.mem.nativeToBig(u32, conn.context.recvNext),
-        });
 
-        try conn.transmit(&ack, "");
+        try conn.transmit(
+            conn.context.recvNext,
+            .{ .ack = true, .syn = true },
+            "",
+        );
         // wait for ACK to establish connection
         if (try conn.waitChange(.SYN_RECEIVED, -1) == .CLOSED)
             return error.AcceptFailed;
@@ -105,7 +101,7 @@ pub fn accept(self: *Self) !*Self {
             client.deinit();
             self.allocator.destroy(client);
         }
-        try client._accepted(&pending.id, &pending.header);
+        try client._accepted(&pending);
         return client;
     }
     return error.NotPending;
@@ -131,17 +127,7 @@ pub fn connect(self: *Self, host: []const u8, port: u16) !void {
             sport,
         );
 
-        var ack: TCP.Header = std.mem.zeroInit(TCP.Header, .{
-            .sport = sport,
-            .dport = self.port,
-            .rsv_flags = .{
-                .doff = @as(u4, @truncate(@sizeOf(TCP.Header) / 4)),
-                .syn = true,
-            },
-        });
-
-        try conn.transmit(&ack, "");
-        // conn.context.sendNext += 1;
+        try conn.transmit(null, .{ .syn = true }, "");
 
         if (try conn.waitChange(.SYN_SENT, -1) == .CLOSED) {
             std.debug.print("Closed\n", .{});
@@ -179,14 +165,10 @@ pub fn write(self: *Self, buffer: []const u8) !usize {
     if (self.state() == .CLOSED) return error.NotConnected;
     // TODO: block if events.write is 0
     // TODO: add to outgoing buffer instead of sending right away
-    var hdr = std.mem.zeroInit(TCP.Header, .{
-        .rsv_flags = .{
-            .doff = @as(u4, @truncate(@sizeOf(TCP.Header) / 4)),
-            .ack = true,
-            .psh = true,
-        },
-        .ack = std.mem.nativeToBig(u32, self.conn.?.context.recvNext),
-    });
-    try self.conn.?.transmit(&hdr, buffer);
+    try self.conn.?.transmit(
+        self.conn.?.context.recvNext,
+        .{ .ack = true, .psh = true },
+        buffer,
+    );
     return buffer.len;
 }

@@ -21,12 +21,20 @@ pub const EndOption = struct {
         _ = .{self};
         return 1;
     }
+    pub fn toBytes(self: EndOption) []const u8 {
+        _ = .{self};
+        return &[_]u8{@intFromEnum(Kind.END)};
+    }
 };
 
 pub const NopOption = struct {
     pub fn size(self: NopOption) usize {
         _ = .{self};
         return 1;
+    }
+    pub fn toBytes(self: NopOption) []const u8 {
+        _ = .{self};
+        return &[_]u8{@intFromEnum(Kind.NOP)};
     }
 };
 
@@ -41,6 +49,13 @@ pub const MSSOption = struct {
             .data = std.mem.readInt(u16, bytes[2..4], .big),
         };
     }
+    pub fn toBytes(self: MSSOption) []const u8 {
+        var bytes: [4]u8 = undefined;
+        bytes[0] = @intFromEnum(Kind.MSS);
+        bytes[1] = @truncate(self.size());
+        std.mem.writeInt(u16, bytes[2..], self.data, .big);
+        return &bytes;
+    }
 };
 
 pub const SACKPermittedOption = struct {
@@ -48,6 +63,10 @@ pub const SACKPermittedOption = struct {
     pub fn size(self: SACKPermittedOption) usize {
         _ = .{self};
         return 2;
+    }
+
+    pub fn toBytes(self: SACKPermittedOption) []const u8 {
+        return &[_]u8{ @intFromEnum(Kind.NOP), @truncate(self.size()) };
     }
 };
 
@@ -77,6 +96,10 @@ pub const SACKOption = struct {
         }
         return opt;
     }
+    pub fn toBytes(self: SACKOption) []const u8 {
+        _ = .{self};
+        return "TODO";
+    }
 };
 
 pub const WindowScaleOption = struct {
@@ -84,6 +107,13 @@ pub const WindowScaleOption = struct {
     pub fn size(self: WindowScaleOption) usize {
         _ = .{self};
         return 3;
+    }
+    pub fn toBytes(self: WindowScaleOption) []const u8 {
+        return &[_]u8{
+            @intFromEnum(Kind.NOP),
+            @truncate(self.size()),
+            self.data,
+        };
     }
 };
 
@@ -106,6 +136,12 @@ pub const Option = union(Kind) {
             .WINDOW_SCALE => .{ .WINDOW_SCALE = .{ .data = bytes[2] } },
             .SACK => .{ .SACK = SACKOption.fromBytes(bytes) },
             .SACK_PERMITTED => .{ .SACK_PERMITTED = .{} },
+        };
+    }
+
+    pub fn toBytes(self: Option) []const u8 {
+        return switch (self) {
+            inline else => |o| o.toBytes(),
         };
     }
 

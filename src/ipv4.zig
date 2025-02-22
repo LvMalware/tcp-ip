@@ -80,6 +80,7 @@ pub const Packet = struct {
     header: Header,
     data: []const u8,
     pub fn fromBytes(bytes: []const u8) !Packet {
+        // TODO: handle IP options
         const header = Header.fromBytes(bytes);
         if (!header.validChecksum()) return error.InvalidIPChecksum;
         return .{

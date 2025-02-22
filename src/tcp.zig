@@ -10,30 +10,30 @@ const Self = @This();
 
 const vtable = IPv4.Handler.VTable{ .handle = vhandle };
 
-const RsvFlags = switch (native_endian) {
+pub const Flags = switch (native_endian) {
     .big => packed struct {
-        doff: u4,
-        rsv: u4,
-        cwr: bool,
-        ece: bool,
-        urg: bool,
-        ack: bool,
-        psh: bool,
-        rst: bool,
-        syn: bool,
-        fin: bool,
+        doff: u4 = @truncate(@sizeOf(Header) / 4),
+        rsv: u4 = 0,
+        cwr: bool = false,
+        ece: bool = false,
+        urg: bool = false,
+        ack: bool = false,
+        psh: bool = false,
+        rst: bool = false,
+        syn: bool = false,
+        fin: bool = false,
     },
     .little => packed struct {
-        rsv: u4,
-        doff: u4,
-        fin: bool,
-        syn: bool,
-        rst: bool,
-        psh: bool,
-        ack: bool,
-        urg: bool,
-        ece: bool,
-        cwr: bool,
+        rsv: u4 = 0,
+        doff: u4 = @truncate(@sizeOf(Header) / 4),
+        fin: bool = false,
+        syn: bool = false,
+        rst: bool = false,
+        psh: bool = false,
+        ack: bool = false,
+        urg: bool = false,
+        ece: bool = false,
+        cwr: bool = false,
     },
 };
 
@@ -65,7 +65,7 @@ pub const Header = extern struct {
     dport: u16 align(1),
     seq: u32 align(1),
     ack: u32 align(1),
-    rsv_flags: RsvFlags align(1), // data offset, reserved bits and flags
+    flags: Flags align(1), // data offset, reserved bits and flags
     window: u16 align(1),
     csum: u16 align(1),
     urgent: u16 align(1),
@@ -113,7 +113,7 @@ pub const Header = extern struct {
     }
 
     pub fn dataOffset(self: Header) usize {
-        return @as(usize, self.rsv_flags.doff) * 4;
+        return @as(usize, self.flags.doff) * 4;
     }
 };
 
@@ -237,14 +237,14 @@ pub fn stop(self: *Self) void {
 
 pub fn segmentRST(header: *const Header) Header {
     return std.mem.zeroInit(Header, .{
-        .seq = if (header.rsv_flags.ack) header.ack else 0,
+        .seq = if (header.flags.ack) header.ack else 0,
         .ack = std.mem.nativeToBig(
             u32,
             std.mem.bigToNative(u32, header.seq) + 1,
         ),
         .sport = header.dport,
         .dport = header.sport,
-        .rsv_flags = .{
+        .flags = .{
             .ack = true,
             .rst = true,
             .doff = @as(u4, @truncate(@sizeOf(Header) / 4)),
@@ -288,10 +288,10 @@ pub fn handle(self: *Self, packet: *const IPv4.Packet) void {
         std.mem.bigToNative(u32, segment.header.seq),
         std.mem.bigToNative(u32, segment.header.ack),
         segment.data.len,
-        segment.header.rsv_flags.syn,
-        segment.header.rsv_flags.ack,
-        segment.header.rsv_flags.fin,
-        segment.header.rsv_flags.rst,
+        segment.header.flags.syn,
+        segment.header.flags.ack,
+        segment.header.flags.fin,
+        segment.header.flags.rst,
     });
     const id: ConnKey = .{
         .saddr = packet.header.saddr,
@@ -309,7 +309,7 @@ pub fn handle(self: *Self, packet: *const IPv4.Packet) void {
         .daddr = packet.header.daddr,
     })) |conn| {
         std.debug.print("Delivering packet to passive connection\n", .{});
-        if (segment.header.rsv_flags.syn) {
+        if (segment.header.flags.syn) {
             conn.handleSegment(&packet.header, &segment);
         }
         return;
@@ -319,7 +319,7 @@ pub fn handle(self: *Self, packet: *const IPv4.Packet) void {
     // "If the state is CLOSED (i.e., TCB does not exist) then all data in the
     // incoming segment is discarded."
 
-    if (segment.header.rsv_flags.rst) {
+    if (segment.header.flags.rst) {
         // "An incoming segment containing a RST is discarded."
         return;
     } else {
