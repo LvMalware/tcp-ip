@@ -291,7 +291,7 @@ pub fn acknowledge(self: *Self, seg: *const TCP.Segment, data: []const u8) void 
     // ensure the right ACK sequence for FIN
     if (seg.header.flags.fin and seg.data.len == 0) seq += 1;
 
-    // TODO: choose data from send buffer, instead of receiving it as a parameter
+    // TODO: choose data from send buffer, instead of receiving from parameter
     self.transmit(@truncate(seq), .{ .ack = true }, data) catch {};
 }
 

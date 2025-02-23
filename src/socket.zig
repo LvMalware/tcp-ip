@@ -64,6 +64,12 @@ fn _accepted(self: *Self, pending: *const Connection.Incoming) !void {
     if (self.conn) |conn| {
         conn.init(self.allocator, self);
         conn.context.irs = std.mem.bigToNative(u32, pending.header.seq);
+        for (pending.options) |opt| {
+            switch (opt) {
+                .MSS => |mss| conn.context.mss = mss.data,
+                else => continue,
+            }
+        }
         conn.context.recvNext = conn.context.irs + 1;
         try conn.setActive(
             .SYN_RECEIVED,
@@ -165,10 +171,22 @@ pub fn write(self: *Self, buffer: []const u8) !usize {
     if (self.state() == .CLOSED) return error.NotConnected;
     // TODO: block if events.write is 0
     // TODO: add to outgoing buffer instead of sending right away
-    try self.conn.?.transmit(
-        self.conn.?.context.recvNext,
-        .{ .ack = true, .psh = true },
-        buffer,
-    );
+    if (self.conn) |conn| {
+        // TODO: must also take into account the length of the options
+        const mss = conn.context.mss - @sizeOf(TCP.Header);
+        var slices = std.mem.window(u8, buffer, mss, mss);
+        while (slices.next()) |slice| {
+            conn.mutex.lock();
+            defer conn.mutex.unlock();
+            try conn.transmit(
+                conn.context.recvNext,
+                .{
+                    .ack = true,
+                    .psh = (slices.index orelse 0 + slices.size) >= buffer.len,
+                },
+                slice,
+            );
+        }
+    } else return error.NotConnected;
     return buffer.len;
 }
