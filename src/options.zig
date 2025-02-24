@@ -21,9 +21,9 @@ pub const EndOption = struct {
         _ = .{self};
         return 1;
     }
-    pub fn toBytes(self: EndOption) []const u8 {
+    pub fn toBytes(self: EndOption, bytes: []u8) void {
         _ = .{self};
-        return &[_]u8{@intFromEnum(Kind.END)};
+        bytes[0] = @intFromEnum(Kind.END);
     }
 };
 
@@ -32,9 +32,9 @@ pub const NopOption = struct {
         _ = .{self};
         return 1;
     }
-    pub fn toBytes(self: NopOption) []const u8 {
+    pub fn toBytes(self: NopOption, bytes: []u8) void {
         _ = .{self};
-        return &[_]u8{@intFromEnum(Kind.NOP)};
+        bytes[0] = @intFromEnum(Kind.NOP);
     }
 };
 
@@ -49,12 +49,10 @@ pub const MSSOption = struct {
             .data = std.mem.readInt(u16, bytes[2..4], .big),
         };
     }
-    pub fn toBytes(self: MSSOption) []const u8 {
-        var bytes: [4]u8 = undefined;
+    pub fn toBytes(self: MSSOption, bytes: []u8) void {
         bytes[0] = @intFromEnum(Kind.MSS);
         bytes[1] = @truncate(self.size());
-        std.mem.writeInt(u16, bytes[2..], self.data, .big);
-        return &bytes;
+        std.mem.writeInt(u16, bytes[2..][0..2], self.data, .big);
     }
 };
 
@@ -65,8 +63,9 @@ pub const SACKPermittedOption = struct {
         return 2;
     }
 
-    pub fn toBytes(self: SACKPermittedOption) []const u8 {
-        return &[_]u8{ @intFromEnum(Kind.NOP), @truncate(self.size()) };
+    pub fn toBytes(self: SACKPermittedOption, bytes: []u8) void {
+        bytes[0] = @intFromEnum(Kind.SACK_PERMITTED);
+        bytes[1] = @truncate(self.size());
     }
 };
 
@@ -96,9 +95,9 @@ pub const SACKOption = struct {
         }
         return opt;
     }
-    pub fn toBytes(self: SACKOption) []const u8 {
-        _ = .{self};
-        return "TODO";
+    pub fn toBytes(self: SACKOption, bytes: []u8) void {
+        _ = .{ self, bytes };
+        // TODO
     }
 };
 
@@ -108,12 +107,10 @@ pub const WindowScaleOption = struct {
         _ = .{self};
         return 3;
     }
-    pub fn toBytes(self: WindowScaleOption) []const u8 {
-        return &[_]u8{
-            @intFromEnum(Kind.NOP),
-            @truncate(self.size()),
-            self.data,
-        };
+    pub fn toBytes(self: WindowScaleOption, bytes: []u8) void {
+        bytes[0] = @intFromEnum(Kind.WINDOW_SCALE);
+        bytes[1] = @truncate(self.size());
+        bytes[2] = self.data;
     }
 };
 
@@ -139,10 +136,10 @@ pub const Option = union(Kind) {
         };
     }
 
-    pub fn toBytes(self: Option) []const u8 {
-        return switch (self) {
-            inline else => |o| o.toBytes(),
-        };
+    pub fn toBytes(self: Option, bytes: []u8) void {
+        switch (self) {
+            inline else => |o| o.toBytes(bytes),
+        }
     }
 
     pub fn size(self: Option) usize {

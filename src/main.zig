@@ -33,6 +33,7 @@ pub fn serverLoop(allocator: std.mem.Allocator, tcp: *TCP) void {
 }
 
 fn clientLoop(allocator: std.mem.Allocator, tcp: *TCP) void {
+    std.time.sleep(5 * std.time.ns_per_s);
     var buffer: [1024]u8 = undefined;
 
     var client = Socket.init(allocator, tcp);

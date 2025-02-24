@@ -127,7 +127,6 @@ pub fn waitChange(self: *Self, state: State, timeout: isize) !State {
 }
 
 pub fn transmit(self: *Self, ack: ?u32, flags: TCP.Flags, data: []const u8) !void {
-
     // TODO: handle MSS, usable window, etc
     // calculate segment len: sizeOf(TCP.Header) + data.len + options len ...
     // if it is bigger than self.context.mss, return error
@@ -149,24 +148,33 @@ pub fn transmit(self: *Self, ack: ?u32, flags: TCP.Flags, data: []const u8) !voi
     );
 
     const buffer = try self.allocator.alloc(u8, @sizeOf(TCP.Header) + data.len);
-    self.retransmission.enqueue(
-        self.context.sendNext,
-        data.len,
-        buffer,
-    ) catch |err| {
-        self.allocator.free(buffer);
-        return err;
-    };
-
     std.mem.copyForwards(u8, buffer[0..], std.mem.asBytes(&header));
-    std.mem.copyForwards(u8, buffer[header.dataOffset()..], data);
 
-    if (header.flags.syn and data.len == 0) {
+    const dataLen = buffer.len - header.dataOffset();
+
+    if (header.dataOffset() > @sizeOf(TCP.Header)) {
+        std.mem.copyForwards(u8, buffer[@sizeOf(TCP.Header)..], data);
+    } else {
+        std.mem.copyForwards(u8, buffer[header.dataOffset()..], data);
+    }
+
+    if (!flags.rst and (!flags.ack or dataLen > 0)) {
+        self.retransmission.enqueue(
+            self.context.sendNext,
+            dataLen,
+            buffer,
+        ) catch |err| {
+            self.allocator.free(buffer);
+            return err;
+        };
+    }
+
+    if (header.flags.syn and dataLen == 0) {
         // after transmiting SYN (or SYN-ACK), we increment SND.NXT by 1
         self.context.sendNext += 1;
     } else {
         // only increment snd.nxt by the amount of data sent
-        self.context.sendNext += @truncate(data.len);
+        self.context.sendNext += @truncate(dataLen);
     }
 
     try self.tcp.ip.send(null, self.id.saddr, .TCP, buffer);

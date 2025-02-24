@@ -79,10 +79,18 @@ fn _accepted(self: *Self, pending: *const Connection.Incoming) !void {
             pending.id.dport,
         );
 
+        const opt = Options.MSSOption{
+            .data = conn.context.mss,
+        };
+        const mss = try self.allocator.alloc(u8, opt.size());
+        defer self.allocator.free(mss);
+        opt.toBytes(mss[0..]);
+        const doff = mss.len + @sizeOf(TCP.Header);
+
         try conn.transmit(
             conn.context.recvNext,
-            .{ .ack = true, .syn = true },
-            "",
+            .{ .doff = @truncate(doff / 4), .ack = true, .syn = true },
+            mss,
         );
         // wait for ACK to establish connection
         if (try conn.waitChange(.SYN_RECEIVED, -1) == .CLOSED)
@@ -133,18 +141,26 @@ pub fn connect(self: *Self, host: []const u8, port: u16) !void {
             sport,
         );
 
-        try conn.transmit(null, .{ .syn = true }, "");
+        const opt = Options.MSSOption{
+            .data = conn.context.mss,
+        };
+        const mss = try self.allocator.alloc(u8, opt.size());
+        defer self.allocator.free(mss);
+        const doff = mss.len + @sizeOf(TCP.Header);
 
-        if (try conn.waitChange(.SYN_SENT, -1) == .CLOSED) {
-            std.debug.print("Closed\n", .{});
+        opt.toBytes(mss[0..]);
+
+        try conn.transmit(
+            null,
+            .{ .doff = @truncate(doff / 4), .syn = true },
+            mss,
+        );
+
+        if (try conn.waitChange(.SYN_SENT, 30 * std.time.ns_per_s) == .CLOSED) {
+            // std.debug.print("Closed\n", .{});
             return error.ConnectionRefused;
         }
     }
-}
-
-pub fn setOption(self: *Self, kind: Options.Kind, value: Options.Option) void {
-    // TODO:
-    _ = .{ self, kind, value };
 }
 
 pub fn state(self: Self) Connection.State {
@@ -178,11 +194,12 @@ pub fn write(self: *Self, buffer: []const u8) !usize {
         while (slices.next()) |slice| {
             conn.mutex.lock();
             defer conn.mutex.unlock();
+            // TODO: check sendWindow as well
             try conn.transmit(
                 conn.context.recvNext,
                 .{
                     .ack = true,
-                    .psh = (slices.index orelse 0 + slices.size) >= buffer.len,
+                    .psh = (slices.index orelse 0 + mss) >= buffer.len,
                 },
                 slice,
             );
