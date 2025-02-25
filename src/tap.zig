@@ -2,9 +2,14 @@ const std = @import("std");
 const linux = std.os.linux;
 const native_endian = @import("builtin").target.cpu.arch.endian();
 
+const Utils = @import("utils.zig");
+
 const IFF_TAP: i16 = 0x0002;
 const IFF_NO_PI: i16 = 0x1000;
 const TUNSETIFF: u32 = 0x400454ca;
+const SIOCSIFADDR: u32 = 0x8916;
+const SIOCGIFFLAGS: i16 = 0x8913;
+const SIOCSIFDSTADDR: u32 = 0x8918;
 
 pub const Device = struct {
     pub const Reader = std.io.Reader(Device, anyerror, read);
@@ -31,7 +36,7 @@ pub const Device = struct {
 
         if (linux.ioctl(dev.fd, TUNSETIFF, @intFromPtr(&ifr)) != 0) {
             std.posix.close(dev.fd);
-            return error.IOCTL;
+            return error.IoCtl;
         }
 
         std.mem.copyForwards(u8, dev.name[0..], &ifr.ifrn.name);
@@ -58,7 +63,6 @@ pub const Device = struct {
             ipv4[i] = try std.fmt.parseInt(u8, octet, 10);
             i += 1;
         }
-        // self.ipaddr = std.mem.nativeToBig(u32, std.mem.readInt(u32, &ipv4, native_endian));
         self.ipaddr = std.mem.readInt(u32, &ipv4, native_endian);
     }
 
