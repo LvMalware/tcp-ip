@@ -4,12 +4,17 @@ const native_endian = @import("builtin").target.cpu.arch.endian();
 
 const Utils = @import("utils.zig");
 
+const IFF_UP: u16 = 0x0001;
 const IFF_TAP: i16 = 0x0002;
 const IFF_NO_PI: i16 = 0x1000;
+const IFF_RUNNING: i16 = 0x0040;
+
 const TUNSETIFF: u32 = 0x400454ca;
 const SIOCSIFADDR: u32 = 0x8916;
-const SIOCGIFFLAGS: i16 = 0x8913;
-const SIOCSIFDSTADDR: u32 = 0x8918;
+const SIOCSIFFLAGS: u32 = 0x8914;
+const SIOCGIFFLAGS: u32 = 0x8913;
+const SIOCSIFHWADDR: u32 = 0x8924;
+const SIOCSIFNETMASK: u32 = 0x891c;
 
 pub const Device = struct {
     pub const Reader = std.io.Reader(Device, anyerror, read);
@@ -54,67 +59,105 @@ pub const Device = struct {
         }
     }
 
-    fn setIPv4Addr(self: *Device, ip: []const u8) !void {
-        var ipv4: [4]u8 = undefined;
-        var i: usize = 0;
-        var split = std.mem.splitScalar(u8, ip, '.');
-        while (split.next()) |octet| {
-            if (i >= 4) break;
-            ipv4[i] = try std.fmt.parseInt(u8, octet, 10);
-            i += 1;
-        }
-        self.ipaddr = std.mem.readInt(u32, &ipv4, native_endian);
-    }
-
     pub fn ifup(self: *Device, mac: []const u8, ip: []const u8) !void {
         try self.setHWAddr(mac);
-        try self.setIPv4Addr(ip);
 
-        _ = try std.process.Child.run(.{
-            .allocator = self.allocator,
-            .argv = &[_][]const u8{
-                "ip",
-                "link",
-                "set",
-                &self.name,
-                "up",
+        self.ipaddr = try Utils.pton(ip);
+
+        var sin = std.mem.zeroInit(linux.sockaddr.in, .{
+            .addr = try Utils.pton("10.0.0.1"),
+        });
+
+        // we need a socket to use SIOCSIFADDR and other netdev IOCTLs
+        const sock: linux.fd_t = @bitCast(
+            @as(u32, @truncate(linux.socket(sin.family, linux.SOCK.DGRAM, 0))),
+        );
+
+        if (sock < 0) return error.Socket;
+
+        defer _ = linux.close(sock);
+
+        var ifr = linux.ifreq{
+            // our tap interface is identified by the name
+            .ifrn = .{ .name = self.name },
+            .ifru = .{
+                .addr = .{
+                    .family = linux.AF.INET,
+                    .data = std.mem.asBytes(&sin)[2..].*,
+                },
             },
-        });
+        };
 
-        const cidr = try std.mem.concat(self.allocator, u8, &[_][]const u8{
-            ip[0..std.mem.lastIndexOfScalar(u8, ip, '.').?],
-            ".1/24",
-        });
+        if (linux.ioctl(sock, SIOCSIFADDR, @intFromPtr(&ifr)) != 0) {
+            return error.IFADDR;
+        }
 
-        // std.debug.print("CIDR: {s}\n", .{cidr});
+        sin.addr = try Utils.pton("255.255.255.0");
 
-        // _ = try std.process.Child.run(.{ .allocator = self.allocator, .argv = &[_][]const u8{ "ip", "route", "add", "dev", &self.name, cidr } });
-        // _ = try std.process.Child.run(.{ .allocator = self.allocator, .argv = &[_][]const u8{ "ip", "address", "add", "dev", &self.name, "local", ip } });
+        ifr.ifru.netmask = .{
+            .family = linux.AF.INET,
+            .data = std.mem.asBytes(&sin)[2..].*,
+        };
 
-        _ = try std.process.Child.run(.{
-            .allocator = self.allocator,
-            .argv = &[_][]const u8{
-                "ip",
-                "addr",
-                "add",
-                cidr,
-                "dev",
-                &self.name,
-            },
-        });
+        if (linux.ioctl(sock, SIOCSIFNETMASK, @intFromPtr(&ifr)) != 0) {
+            return error.IFNETMASK;
+        }
+
+        if (linux.ioctl(sock, SIOCGIFFLAGS, @intFromPtr(&ifr)) != 0) {
+            return error.GETFLAGS;
+        }
+
+        ifr.ifru.flags |= IFF_UP;
+
+        if (linux.ioctl(sock, SIOCSIFFLAGS, @intFromPtr(&ifr)) != 0) {
+            return error.IFUP;
+        }
+
+        // _ = try std.process.Child.run(.{
+        //     .allocator = self.allocator,
+        //     .argv = &[_][]const u8{
+        //         "ip",
+        //         "link",
+        //         "set",
+        //         &self.name,
+        //         "up",
+        //     },
+        // });
     }
 
     pub fn ifdown(self: Device) !void {
-        _ = try std.process.Child.run(.{
-            .allocator = self.allocator,
-            .argv = &[_][]const u8{
-                "ip",
-                "link",
-                "set",
-                &self.name,
-                "down",
-            },
-        });
+        const sock: linux.fd_t = @bitCast(
+            @as(u32, @truncate(linux.socket(2, linux.SOCK.DGRAM, 0))),
+        );
+
+        if (sock < 0) return error.Socket;
+
+        defer _ = linux.close(sock);
+
+        var ifr = linux.ifreq{
+            .ifrn = .{ .name = self.name },
+            .ifru = undefined,
+        };
+
+        if (linux.ioctl(sock, SIOCGIFFLAGS, @intFromPtr(&ifr)) != 0) {
+            return error.GETFLAGS;
+        }
+
+        ifr.ifru.flags |= IFF_UP;
+
+        if (linux.ioctl(sock, SIOCSIFFLAGS, @intFromPtr(&ifr)) != 0) {
+            return error.IFDOWN;
+        }
+        // _ = try std.process.Child.run(.{
+        //     .allocator = self.allocator,
+        //     .argv = &[_][]const u8{
+        //         "ip",
+        //         "link",
+        //         "set",
+        //         &self.name,
+        //         "down",
+        //     },
+        // });
     }
 
     pub fn deinit(self: Device) void {
