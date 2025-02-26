@@ -64,6 +64,7 @@ pub const Device = struct {
 
         self.ipaddr = try Utils.pton(ip);
 
+        // TODO: let the user assign a custom netmask and host ip
         var sin = std.mem.zeroInit(linux.sockaddr.in, .{
             .addr = try Utils.pton("10.0.0.1"),
         });
@@ -73,12 +74,12 @@ pub const Device = struct {
             @as(u32, @truncate(linux.socket(sin.family, linux.SOCK.DGRAM, 0))),
         );
 
-        if (sock < 0) return error.Socket;
+        if (sock < 0) return error.SOCKET;
 
         defer _ = linux.close(sock);
 
         var ifr = linux.ifreq{
-            // our tap interface is identified by the name
+            // our tap interface is identified its name
             .ifrn = .{ .name = self.name },
             .ifru = .{
                 .addr = .{
@@ -103,26 +104,11 @@ pub const Device = struct {
             return error.IFNETMASK;
         }
 
-        if (linux.ioctl(sock, SIOCGIFFLAGS, @intFromPtr(&ifr)) != 0) {
-            return error.GETFLAGS;
-        }
-
-        ifr.ifru.flags |= IFF_UP;
+        ifr.ifru.flags = IFF_UP;
 
         if (linux.ioctl(sock, SIOCSIFFLAGS, @intFromPtr(&ifr)) != 0) {
             return error.IFUP;
         }
-
-        // _ = try std.process.Child.run(.{
-        //     .allocator = self.allocator,
-        //     .argv = &[_][]const u8{
-        //         "ip",
-        //         "link",
-        //         "set",
-        //         &self.name,
-        //         "up",
-        //     },
-        // });
     }
 
     pub fn ifdown(self: Device) !void {
@@ -130,39 +116,23 @@ pub const Device = struct {
             @as(u32, @truncate(linux.socket(2, linux.SOCK.DGRAM, 0))),
         );
 
-        if (sock < 0) return error.Socket;
+        if (sock < 0) return error.SOCKET;
 
         defer _ = linux.close(sock);
 
-        var ifr = linux.ifreq{
+        const ifr = linux.ifreq{
             .ifrn = .{ .name = self.name },
-            .ifru = undefined,
+            .ifru = .{ .flags = @bitCast(~IFF_UP) },
         };
-
-        if (linux.ioctl(sock, SIOCGIFFLAGS, @intFromPtr(&ifr)) != 0) {
-            return error.GETFLAGS;
-        }
-
-        ifr.ifru.flags |= IFF_UP;
 
         if (linux.ioctl(sock, SIOCSIFFLAGS, @intFromPtr(&ifr)) != 0) {
             return error.IFDOWN;
         }
-        // _ = try std.process.Child.run(.{
-        //     .allocator = self.allocator,
-        //     .argv = &[_][]const u8{
-        //         "ip",
-        //         "link",
-        //         "set",
-        //         &self.name,
-        //         "down",
-        //     },
-        // });
     }
 
     pub fn deinit(self: Device) void {
-        std.posix.close(self.fd);
         self.ifdown() catch {};
+        std.posix.close(self.fd);
     }
 
     pub fn read(self: Device, buffer: []u8) !usize {

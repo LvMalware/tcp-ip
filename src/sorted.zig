@@ -74,7 +74,7 @@ pub fn getData(self: *Self, buffer: []u8) !usize {
         } else if (item.seq > last) {
             return error.NonContiguousData;
         }
-        if (item.psh) {
+        if (item.psh and last >= item.end) {
             self.psh -= if (self.psh > 0) 1 else 0;
             break;
         }
@@ -151,10 +151,10 @@ pub fn ackable(self: *Self) ?usize {
 
 pub fn insert(self: *Self, seq: usize, data: []const u8, psh: bool) !void {
     self.mutex.lock();
-    defer self.mutex.unlock();
 
     defer {
         self.condition.signal();
+        self.mutex.unlock();
     }
 
     const node = try self.allocator.create(List.Node);
@@ -170,8 +170,14 @@ pub fn insert(self: *Self, seq: usize, data: []const u8, psh: bool) !void {
 
     var item = self.items.first;
 
-    // TODO: check data boundaries when inserting to skip previously received
-    // data
+    // check data boundaries when inserting to skip previously received data
+    if (data.len > 0 and self.last_cont != null and
+        node.data.end <= self.last_cont.?)
+    {
+        self.allocator.free(node.data.data);
+        self.allocator.destroy(node);
+        return;
+    }
 
     while (item != null) : (item = item.?.next) {
         if (item.?.data.seq <= seq and item.?.data.end >= node.data.end)
@@ -182,7 +188,6 @@ pub fn insert(self: *Self, seq: usize, data: []const u8, psh: bool) !void {
                 if (prev.data.end >= node.data.end) {
                     self.allocator.free(node.data.data);
                     self.allocator.destroy(node);
-                    return;
                 }
             }
             self.items.insertBefore(item.?, node);

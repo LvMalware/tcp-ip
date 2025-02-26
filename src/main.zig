@@ -12,28 +12,27 @@ pub fn serverLoop(allocator: std.mem.Allocator, tcp: *TCP) void {
     var server = Socket.init(allocator, tcp);
     defer server.deinit();
 
-    var buffer: [1024]u8 = undefined;
     server.listen("10.0.0.4", 5501, 1) catch return;
     std.debug.print("Listenning...\n", .{});
 
     var client = server.accept() catch return;
     defer client.deinit();
+
     std.debug.print("Accepted connection!\n", .{});
 
+    var buffer: [1024]u8 = undefined;
     while (client.state() == .ESTABLISHED) {
         const size = client.read(buffer[0..]) catch {
             continue;
         };
-        if (size == 0) {
-            break;
-        }
+        if (size == 0) break;
         std.debug.print("[Server] Received: {s}\n", .{buffer[0..size]});
         _ = client.write(buffer[0..size]) catch {};
     }
+    std.debug.print("Client disconnected. Finishing...\n", .{});
 }
 
 fn clientLoop(allocator: std.mem.Allocator, tcp: *TCP) void {
-    std.time.sleep(5 * std.time.ns_per_s);
     var buffer: [1024]u8 = undefined;
 
     var client = Socket.init(allocator, tcp);
@@ -85,6 +84,7 @@ pub fn main() !void {
     var tcp = TCP.init(allocator, &ip, 400);
     defer tcp.deinit();
 
+    // start retransmission
     try tcp.start();
 
     var icmp = ICMP4.init(allocator, &ip);

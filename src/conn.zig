@@ -70,7 +70,6 @@ received: Sorted,
 allocator: std.mem.Allocator,
 // send_buffer: []u8,
 retransmission: Queue,
-// TODO: have a thread to retransmit packets...
 
 pub fn init(self: *Self, allocator: std.mem.Allocator, sock: *Socket) void {
     const iss = std.crypto.random.int(u32);
@@ -127,9 +126,10 @@ pub fn waitChange(self: *Self, state: State, timeout: isize) !State {
 }
 
 pub fn transmit(self: *Self, ack: ?u32, flags: TCP.Flags, data: []const u8) !void {
-    // TODO: handle MSS, usable window, etc
-    // calculate segment len: sizeOf(TCP.Header) + data.len + options len ...
-    // if it is bigger than self.context.mss, return error
+    // TODO: check usable window
+    if (@sizeOf(TCP.Header) + data.len > self.context.mss)
+        return error.SegmentTooBig;
+
     var header = std.mem.zeroInit(TCP.Header, .{
         .seq = nativeToBig(u32, self.context.sendNext),
         .ack = nativeToBig(u32, ack orelse 0),
