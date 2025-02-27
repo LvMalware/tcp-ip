@@ -194,7 +194,7 @@ pub fn write(self: *Self, buffer: []const u8) !usize {
         while (slices.next()) |slice| {
             conn.mutex.lock();
             defer conn.mutex.unlock();
-            // TODO: check sendWindow as well
+
             try conn.transmit(
                 conn.context.recvNext,
                 .{

@@ -63,7 +63,6 @@ pub fn readFrame(self: *Self) !Frame {
     const size = try self.dev.read(buff[0..]);
     var frame = std.mem.bytesToValue(Frame, buff[0..size]);
 
-    // TODO: maybe not change endianess?
     if (native_endian != .big) {
         std.mem.byteSwapAllFields(Header, &frame.header);
     }

@@ -125,7 +125,6 @@ pub fn request(self: Self, addr: u32) !void {
         .opcode = @intFromEnum(Opcode.arp_request),
     };
 
-    // TODO: maybe not change endianess?
     if (native_endian != .big) {
         std.mem.byteSwapAllFields(Header, &header);
     }
@@ -194,7 +193,6 @@ pub fn reply(self: Self, packet: *const Header, arp: *const ARPIPv4) !void {
     std.mem.copyForwards(u8, ipv4.dmac[0..], arp.smac[0..]);
     std.mem.copyForwards(u8, ipv4.smac[0..], self.ethernet.dev.hwaddr[0..]);
 
-    // TODO: maybe not change endianess?
     if (native_endian != .big) {
         std.mem.byteSwapAllFields(Header, &header);
     }
@@ -214,7 +212,6 @@ pub fn reply(self: Self, packet: *const Header, arp: *const ARPIPv4) !void {
 pub fn handle(self: *Self, frame: *const Ethernet.Frame) void {
     var packet = std.mem.bytesToValue(Header, frame.data[0..]);
 
-    // TODO: maybe not change endianess?
     if (native_endian != .big) {
         std.mem.byteSwapAllFields(Header, &packet);
     }

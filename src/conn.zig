@@ -62,6 +62,7 @@ tcp: *TCP,
 sock: *Socket,
 mutex: std.Thread.Mutex,
 state: State = .CLOSED,
+timer: std.time.Timer,
 backlog: usize,
 changed: std.Thread.Condition,
 context: Context,
@@ -79,6 +80,7 @@ pub fn init(self: *Self, allocator: std.mem.Allocator, sock: *Socket) void {
         .tcp = sock.tcp,
         .sock = sock,
         .mutex = .{},
+        .timer = undefined,
         .backlog = 128,
         .changed = .{},
         .pending = .{},
@@ -409,7 +411,10 @@ pub fn handleSegment(
 
     switch (self.state) {
         .CLOSING => {
-            // TODO
+            if (segment.header.flags.rst) {
+                self.state = .CLOSED;
+                self.changed.signal();
+            }
         },
         .SYN_RECEIVED => {
             if (segment.header.flags.ack) {
@@ -432,19 +437,32 @@ pub fn handleSegment(
             return;
         },
         .LAST_ACK => {
-            if (segment.header.flags.ack) {
+            if (segment.header.flags.rst or segment.header.flags.ack) {
+                self.state = .CLOSED;
+                self.changed.signal();
+            }
+        },
+        .TIME_WAIT => {
+            // TODO: check timer to close connection after 2 MSL
+            if (segment.header.flags.rst) {
                 self.state = .CLOSED;
                 self.changed.signal();
                 return;
             }
-        },
-        .TIME_WAIT => {
-            // TODO: start a timer to close the connection
+
+            if (segment.header.flags.fin) {
+                // fin retransmitted
+                self.acknowledge(segment, "");
+                self.state = .CLOSE_WAIT;
+                self.timer.reset();
+                self.changed.signal();
+            }
         },
         .FIN_WAIT1 => {
             if (segment.header.flags.fin) {
                 self.state = .TIME_WAIT;
                 self.changed.signal();
+                self.timer = std.time.Timer.start() catch unreachable;
             } else if (segment.header.flags.ack) {
                 self.state = .FIN_WAIT2;
                 self.changed.signal();
@@ -458,6 +476,7 @@ pub fn handleSegment(
             if (segment.header.flags.fin) {
                 self.state = .TIME_WAIT;
                 self.changed.signal();
+                self.timer = std.time.Timer.start() catch unreachable;
             }
         },
         .CLOSE_WAIT, .ESTABLISHED => {

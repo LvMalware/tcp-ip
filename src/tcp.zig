@@ -69,7 +69,6 @@ pub const Header = extern struct {
     window: u16 align(1),
     csum: u16 align(1),
     urgent: u16 align(1),
-    // TODO: handle TCP options
 
     pub fn fromBytes(bytes: []const u8) Header {
         return std.mem.bytesToValue(Header, bytes[0..@sizeOf(Header)]);
