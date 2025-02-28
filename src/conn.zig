@@ -331,19 +331,7 @@ pub fn handleSegment(
                 return;
 
             if (segment.header.flags.ack) {
-                var rst = TCP.segmentRST(&segment.header);
-                rst.csum = rst.checksum(
-                    ip.saddr,
-                    ip.daddr,
-                    ip.proto,
-                    "",
-                );
-                self.tcp.ip.send(
-                    null,
-                    ip.saddr,
-                    .TCP,
-                    std.mem.asBytes(&rst),
-                ) catch {};
+                self.reset(segment, true);
             } else if (segment.header.flags.syn) {
                 // TODO: check security and precedence
 
@@ -356,8 +344,8 @@ pub fn handleSegment(
             if (segment.header.flags.ack) {
                 const ack = bigToNative(u32, segment.header.ack);
                 if (ack <= self.context.iss or ack > self.context.sendNext) {
-                    if (segment.header.flags.rst) return;
-                    self.transmit(null, .{ .rst = true }, "") catch {};
+                    if (!segment.header.flags.rst)
+                        self.transmit(null, .{ .rst = true }, "") catch {};
                     return;
                 }
                 self.retransmission.ack(ack);
@@ -472,6 +460,11 @@ pub fn handleSegment(
             if (segment.header.flags.ack) {
                 // "if the retransmission queue is empty, the user's CLOSE can
                 // be acknowledged ("ok") but do not delete the TCB."
+                if (self.retransmission.items.len == 0) {
+                    self.state = .CLOSED;
+                    self.changed.signal();
+                    return;
+                }
             }
             if (segment.header.flags.fin) {
                 self.state = .TIME_WAIT;
@@ -479,7 +472,11 @@ pub fn handleSegment(
                 self.timer = std.time.Timer.start() catch unreachable;
             }
         },
-        .CLOSE_WAIT, .ESTABLISHED => {
+        .CLOSE_WAIT => {
+            // a FIN has been received...
+            return;
+        },
+        .ESTABLISHED => {
             // TODO: most of the states above also share the code below, so
             // maybe we can move it outisde the switch statement
             if (segment.header.flags.ack) {

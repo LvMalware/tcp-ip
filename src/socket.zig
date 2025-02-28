@@ -35,6 +35,8 @@ pub fn init(allocator: std.mem.Allocator, tcp: *TCP) Self {
 }
 
 pub fn deinit(self: *Self) void {
+    self.mutex.lock();
+    defer self.mutex.unlock();
     if (self.conn) |conn| {
         conn.deinit();
         self.allocator.destroy(conn);
@@ -43,15 +45,19 @@ pub fn deinit(self: *Self) void {
 }
 
 pub fn close(self: *Self) void {
-    if (self.state() == .CLOSED) return;
     switch (self.state()) {
-        .ESTABLISHED, .SYN_SENT => {
-            // TODO: send FIN
-            self.addr = 0;
-            self.port = 0;
+        .CLOSED, .FIN_WAIT1, .FIN_WAIT2, .CLOSING, .LAST_ACK, .TIME_WAIT => {},
+        .ESTABLISHED, .SYN_RECEIVED => {
+            // wait until all sends are finished, send a FIN and enter the
+            // FIN_WAIT1 state
+        },
+        .CLOSE_WAIT => {
+            // wait until all sends are finished, send a FIN and enter the
+            // CLOSING state
+        },
+        .SYN_SENT, .LISTEN => {
             self.deinit();
         },
-        else => return,
     }
 }
 
@@ -124,6 +130,7 @@ pub fn accept(self: *Self) !*Self {
 pub fn connect(self: *Self, host: []const u8, port: u16) !void {
     self.mutex.lock();
     defer self.mutex.unlock();
+    if (self.state() != .CLOSED) return error.SocketInUse;
     self.addr = try Utils.pton(host);
     self.port = std.mem.nativeToBig(u16, port);
     self.conn = try self.allocator.create(Connection);
@@ -179,16 +186,36 @@ pub fn listen(self: *Self, host: []const u8, port: u16, backlog: usize) !void {
 }
 
 pub fn read(self: *Self, buffer: []u8) !usize {
-    if (self.state() == .CLOSED) return error.NotConnected;
-    return try self.conn.?.received.getData(buffer);
+    return switch (self.state()) {
+        .CLOSED, .LISTEN => error.NotConnected,
+        .CLOSING, .LAST_ACK, .TIME_WAIT => error.Closing,
+        .CLOSE_WAIT => {
+            const size = if (buffer.len > self.conn.?.received.contiguous_len)
+                self.conn.?.received.contiguous_len
+            else
+                buffer.len;
+            return try self.conn.?.received.getData(buffer[0..size]);
+        },
+        else => try self.conn.?.received.getData(buffer),
+    };
+}
+
+pub fn send(self: *Self, buffer: []const u8) !usize {
+    // TODO: enqueue sends
+    _ = .{ self, buffer };
 }
 
 pub fn write(self: *Self, buffer: []const u8) !usize {
-    if (self.state() == .CLOSED) return error.NotConnected;
+    switch (self.state()) {
+        .CLOSED => return error.NotConnected,
+        .FIN_WAIT1, .FIN_WAIT2, .CLOSING, .LAST_ACK, .TIME_WAIT => {
+            return error.Closing;
+        },
+        else => {},
+    }
     // TODO: block if events.write is 0
     // TODO: add to outgoing buffer instead of sending right away
     if (self.conn) |conn| {
-        // TODO: must also take into account the length of the options
         const mss = conn.context.mss - @sizeOf(TCP.Header);
         var slices = std.mem.window(u8, buffer, mss, mss);
         while (slices.next()) |slice| {
