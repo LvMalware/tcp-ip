@@ -5,6 +5,7 @@ const IPv4 = @import("ipv4.zig");
 const Option = @import("options.zig").Option;
 const Connection = @import("conn.zig");
 const ConnKey = Connection.Id;
+const SendQueue = @import("sendqueue.zig");
 
 const Self = @This();
 
@@ -170,9 +171,12 @@ pub const Segment = struct {
 ip: *IPv4,
 rto: usize,
 mutex: std.Thread.Mutex,
+cansend: std.Thread.Condition,
 running: std.atomic.Value(bool),
+sendqueue: SendQueue,
 allocator: std.mem.Allocator,
 retransmit: ?std.Thread,
+transmission: ?std.Thread,
 listenning: std.AutoHashMap(ConnKey, *Connection),
 connections: std.AutoHashMap(ConnKey, *Connection),
 pub fn init(allocator: std.mem.Allocator, ip: *IPv4, rto: usize) Self {
@@ -180,9 +184,12 @@ pub fn init(allocator: std.mem.Allocator, ip: *IPv4, rto: usize) Self {
         .ip = ip,
         .rto = rto,
         .mutex = .{},
+        .cansend = .{},
         .running = std.atomic.Value(bool).init(false),
+        .sendqueue = undefined,
         .allocator = allocator,
         .retransmit = null,
+        .transmission = null,
         .listenning = std.AutoHashMap(ConnKey, *Connection).init(allocator),
         .connections = std.AutoHashMap(ConnKey, *Connection).init(allocator),
     };
@@ -192,13 +199,29 @@ pub fn deinit(self: *Self) void {
     self.stop();
     self.mutex.lock();
     defer self.mutex.unlock();
-    self.running.store(false, .release);
+    self.sendqueue.deinit();
     self.listenning.deinit();
     self.connections.deinit();
 }
 
 pub fn handler(self: *Self) IPv4.Handler {
     return .{ .vtable = &vtable, .ptr = self };
+}
+
+fn transmissionLoop(self: *Self) void {
+    std.atomic.spinLoopHint();
+    while (self.running.load(.acquire)) {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        while (self.sendqueue.empty()) {
+            self.cansend.wait(&self.mutex);
+        }
+        while (self.sendqueue.dequeue()) |out| {
+            if (self.connections.get(out.id)) |_| {
+                self.ip.send(null, out.id.saddr, .TCP, out.data) catch {};
+            }
+        }
+    }
 }
 
 fn retransmissionLoop(self: *Self) void {
@@ -212,10 +235,6 @@ fn retransmissionLoop(self: *Self) void {
         while (iter.next()) |conn| {
             conn.*.retransmit() catch continue;
         }
-        iter = self.listenning.valueIterator();
-        while (iter.next()) |conn| {
-            conn.*.retransmit() catch continue;
-        }
     }
 }
 
@@ -223,13 +242,19 @@ pub fn start(self: *Self) !void {
     self.mutex.lock();
     defer self.mutex.unlock();
     self.running.store(true, .release);
+    self.sendqueue = SendQueue.init(self.allocator, self);
     self.retransmit = try std.Thread.spawn(.{}, retransmissionLoop, .{self});
+    self.transmission = try std.Thread.spawn(.{}, transmissionLoop, .{self});
 }
 
 pub fn stop(self: *Self) void {
     self.mutex.lock();
     defer self.mutex.unlock();
+    self.running.store(false, .release);
     if (self.retransmit) |*thread| {
+        thread.detach();
+    }
+    if (self.transmission) |*thread| {
         thread.detach();
     }
 }

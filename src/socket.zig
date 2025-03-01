@@ -200,11 +200,6 @@ pub fn read(self: *Self, buffer: []u8) !usize {
     };
 }
 
-pub fn send(self: *Self, buffer: []const u8) !usize {
-    // TODO: enqueue sends
-    _ = .{ self, buffer };
-}
-
 pub fn write(self: *Self, buffer: []const u8) !usize {
     switch (self.state()) {
         .CLOSED => return error.NotConnected,
@@ -215,12 +210,19 @@ pub fn write(self: *Self, buffer: []const u8) !usize {
     }
     // TODO: block if events.write is 0
     // TODO: add to outgoing buffer instead of sending right away
+    var sent: usize = 0;
     if (self.conn) |conn| {
-        const mss = conn.context.mss - @sizeOf(TCP.Header);
+        const mss = conn.getMSS();
         var slices = std.mem.window(u8, buffer, mss, mss);
         while (slices.next()) |slice| {
             conn.mutex.lock();
             defer conn.mutex.unlock();
+            const limit = if (conn.usableWindow() > slice.len)
+                slice.len
+            else
+                conn.usableWindow();
+
+            if (limit == 0) break;
 
             try conn.transmit(
                 conn.context.recvNext,
@@ -228,9 +230,10 @@ pub fn write(self: *Self, buffer: []const u8) !usize {
                     .ack = true,
                     .psh = (slices.index orelse 0 + mss) >= buffer.len,
                 },
-                slice,
+                slice[0..limit],
             );
+            sent += limit;
         }
-    } else return error.NotConnected;
-    return buffer.len;
+    }
+    return sent;
 }

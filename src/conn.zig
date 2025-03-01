@@ -69,7 +69,6 @@ context: Context,
 pending: std.TailQueue(Incoming),
 received: Sorted,
 allocator: std.mem.Allocator,
-// send_buffer: []u8,
 retransmission: Queue,
 
 pub fn init(self: *Self, allocator: std.mem.Allocator, sock: *Socket) void {
@@ -91,7 +90,6 @@ pub fn init(self: *Self, allocator: std.mem.Allocator, sock: *Socket) void {
         },
         .received = Sorted.init(allocator),
         .allocator = allocator,
-        // .send_buffer = undefined,
         .retransmission = Queue.init(
             allocator,
             sock.tcp.rto * std.time.ns_per_ms,
@@ -113,9 +111,22 @@ pub fn deinit(self: *Self) void {
     self.changed.signal();
 }
 
+pub fn getMSS(self: *Self) u16 {
+    self.mutex.lock();
+    defer self.mutex.unlock();
+    return self.context.mss - @sizeOf(TCP.Header);
+}
+
+pub fn usableWindow(self: *Self) u16 {
+    return self.context.sendWindow - @as(u16, @truncate(
+        self.context.sendNext - self.context.sendUnack,
+    ));
+}
+
 pub fn retransmit(self: *Self) !void {
     while (self.retransmission.next()) |next| {
-        try self.tcp.ip.send(null, self.id.saddr, .TCP, next);
+        // try self.tcp.ip.send(null, self.id.saddr, .TCP, next);
+        try self.tcp.sendqueue.enqueue(self.id, next);
     }
 }
 
@@ -179,7 +190,11 @@ pub fn transmit(self: *Self, ack: ?u32, flags: TCP.Flags, data: []const u8) !voi
         self.context.sendNext += @truncate(dataLen);
     }
 
-    try self.tcp.ip.send(null, self.id.saddr, .TCP, buffer);
+    if (self.state == .SYN_RECEIVED) {
+        try self.tcp.ip.send(null, self.id.saddr, .TCP, buffer);
+    } else {
+        try self.tcp.sendqueue.enqueue(self.id, buffer);
+    }
 }
 
 pub fn nextPending(self: *Self) ?Incoming {
