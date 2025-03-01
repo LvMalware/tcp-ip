@@ -35,6 +35,10 @@ pub fn deinit(self: *Self) void {
 pub fn enqueue(self: *Self, id: Connection.Id, data: []const u8) !void {
     self.mutex.lock();
     defer self.mutex.unlock();
+
+    // TODO: check if this data is not on the queue already
+    // TODO: validate if packet has been ACKed (data has been free'd)
+
     const node = try self.allocator.create(@TypeOf(self.queue).Node);
     errdefer self.allocator.destroy(node);
     node.data = .{

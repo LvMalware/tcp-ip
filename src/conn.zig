@@ -125,7 +125,8 @@ pub fn usableWindow(self: *Self) u16 {
 
 pub fn retransmit(self: *Self) !void {
     while (self.retransmission.next()) |next| {
-        // try self.tcp.ip.send(null, self.id.saddr, .TCP, next);
+        // TODO: make sure data this segment is not on the sendqueue already,
+        // before adding it there
         try self.tcp.sendqueue.enqueue(self.id, next);
     }
 }
