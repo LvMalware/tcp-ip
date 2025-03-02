@@ -140,17 +140,6 @@ pub const Segment = struct {
         var index: usize = @sizeOf(Header);
         while (index < header.dataOffset()) {
             const option = Option.fromBytes(packet.data[index..]) catch break;
-            // switch (option) {
-            //     .MSS => |mss| {
-            //         std.debug.print("Maximum Segment Size: {d}\n", .{mss.data});
-            //     },
-            //     .NOP => {},
-            //     .END => break,
-            //     .WINDOW_SCALE => |win| {
-            //         std.debug.print("Window scale: {d}\n", .{win.data});
-            //     },
-            //     else => {},
-            // }
             try options.append(option);
             index += option.size();
             if (option == .END) break;
@@ -165,6 +154,12 @@ pub const Segment = struct {
 
     pub fn deinit(self: Segment, allocator: std.mem.Allocator) void {
         allocator.free(self.options);
+    }
+
+    pub fn len(self: Segment) u16 {
+        return @truncate(
+            self.data.len - (self.header.dataOffset() - @sizeOf(Header)),
+        );
     }
 };
 

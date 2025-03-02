@@ -306,7 +306,7 @@ pub fn unacceptable(self: *Self, segment: *const TCP.Segment) void {
 
 pub fn acknowledge(self: *Self, seg: *const TCP.Segment, data: []const u8) void {
     const segEnd = bigToNative(u32, seg.header.seq) + if (seg.data.len > 0)
-        seg.data.len
+        seg.len()
     else
         1;
 
