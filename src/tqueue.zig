@@ -7,7 +7,7 @@ const Node = std.TailQueue(Item).Node;
 const Item = struct {
     id: Connection.Id,
     end: u32,
-    ret: usize = 1,
+    ret: usize = 0,
     timeout: usize,
     segment: []const u8,
 };
@@ -51,6 +51,8 @@ pub fn insert(self: *Self, node: *Node) void {
         }
     }
     self.queue.append(node);
+    // signal pending so dequeue() will unlock when queue is currently empty
+    self.pending.signal();
 }
 
 pub fn dequeue(self: *Self) ?Item {
@@ -107,6 +109,7 @@ pub fn enqueue(
 pub fn ack(self: *Self, id: Connection.Id, seq: u32) void {
     self.mutex.lock();
     defer self.mutex.unlock();
+    const count = self.queue.len;
     var item = self.queue.first;
     while (item != null) {
         const next = item.?.next;
@@ -117,6 +120,8 @@ pub fn ack(self: *Self, id: Connection.Id, seq: u32) void {
         }
         item = next;
     }
+    // signal pending to avoid dequeue() waiting to retransmit ACKed segments
+    if (count > self.queue.len) self.pending.signal();
 }
 
 pub fn countPending(self: *Self, id: Connection.Id) usize {
