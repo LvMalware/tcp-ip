@@ -5,7 +5,7 @@ const IPv4 = @import("ipv4.zig");
 const Option = @import("options.zig").Option;
 const Connection = @import("conn.zig");
 const ConnKey = Connection.Id;
-const SendQueue = @import("sendqueue.zig");
+const SendQueue = @import("tqueue.zig"); //@import("sendqueue.zig");
 
 const Self = @This();
 
@@ -170,7 +170,6 @@ cansend: std.Thread.Condition,
 running: std.atomic.Value(bool),
 sendqueue: SendQueue,
 allocator: std.mem.Allocator,
-retransmit: ?std.Thread,
 transmission: ?std.Thread,
 listenning: std.AutoHashMap(ConnKey, *Connection),
 connections: std.AutoHashMap(ConnKey, *Connection),
@@ -183,7 +182,6 @@ pub fn init(allocator: std.mem.Allocator, ip: *IPv4, rto: usize) Self {
         .running = std.atomic.Value(bool).init(false),
         .sendqueue = undefined,
         .allocator = allocator,
-        .retransmit = null,
         .transmission = null,
         .listenning = std.AutoHashMap(ConnKey, *Connection).init(allocator),
         .connections = std.AutoHashMap(ConnKey, *Connection).init(allocator),
@@ -206,30 +204,13 @@ pub fn handler(self: *Self) IPv4.Handler {
 fn transmissionLoop(self: *Self) void {
     std.atomic.spinLoopHint();
     while (self.running.load(.acquire)) {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        while (self.sendqueue.empty()) {
-            self.cansend.wait(&self.mutex);
-        }
-        while (self.sendqueue.dequeue()) |out| {
-            if (self.connections.get(out.id)) |_| {
-                self.ip.send(null, out.id.saddr, .TCP, out.data) catch {};
-            }
-        }
-    }
-}
-
-fn retransmissionLoop(self: *Self) void {
-    while (self.running.load(.acquire)) {
-        std.atomic.spinLoopHint();
-        std.time.sleep(self.rto * std.time.ns_per_ms);
-        if (!self.running.load(.acquire)) return;
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        var iter = self.connections.valueIterator();
-        while (iter.next()) |conn| {
-            conn.*.retransmit() catch continue;
-        }
+        const item = self.sendqueue.dequeue() orelse continue;
+        // simulate random packet loss:
+        // if (std.crypto.random.boolean()) {
+        //     std.debug.print("Losing packet {d}...\n", .{item.end});
+        //     continue;
+        // }
+        self.ip.send(null, item.id.saddr, .TCP, item.segment) catch continue;
     }
 }
 
@@ -237,8 +218,7 @@ pub fn start(self: *Self) !void {
     self.mutex.lock();
     defer self.mutex.unlock();
     self.running.store(true, .release);
-    self.sendqueue = SendQueue.init(self.allocator, self);
-    self.retransmit = try std.Thread.spawn(.{}, retransmissionLoop, .{self});
+    self.sendqueue = SendQueue.init(self.allocator, self.rto);
     self.transmission = try std.Thread.spawn(.{}, transmissionLoop, .{self});
 }
 
@@ -246,9 +226,6 @@ pub fn stop(self: *Self) void {
     self.mutex.lock();
     defer self.mutex.unlock();
     self.running.store(false, .release);
-    if (self.retransmit) |*thread| {
-        thread.detach();
-    }
     if (self.transmission) |*thread| {
         thread.detach();
     }

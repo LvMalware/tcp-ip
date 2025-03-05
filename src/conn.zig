@@ -5,7 +5,7 @@ const nativeToBig = std.mem.nativeToBig;
 
 const TCP = @import("tcp.zig");
 const IPv4 = @import("ipv4.zig");
-const Queue = @import("queue.zig");
+// const Queue = @import("queue.zig");
 const Socket = @import("socket.zig");
 const Sorted = @import("sorted.zig");
 const Option = @import("options.zig").Option;
@@ -20,6 +20,10 @@ pub const Id = struct {
     sport: u16 = 0,
     daddr: u32 = 0,
     dport: u16 = 0,
+    pub fn eql(self: Id, other: Id) bool {
+        return self.saddr == other.saddr and self.sport == other.sport and
+            self.daddr == other.daddr and self.dport == other.dport;
+    }
 };
 
 const Context = struct {
@@ -69,7 +73,6 @@ context: Context,
 pending: std.TailQueue(Incoming),
 received: Sorted,
 allocator: std.mem.Allocator,
-retransmission: Queue,
 
 pub fn init(self: *Self, allocator: std.mem.Allocator, sock: *Socket) void {
     const iss = std.crypto.random.int(u32);
@@ -90,10 +93,6 @@ pub fn init(self: *Self, allocator: std.mem.Allocator, sock: *Socket) void {
         },
         .received = Sorted.init(allocator),
         .allocator = allocator,
-        .retransmission = Queue.init(
-            allocator,
-            sock.tcp.rto * std.time.ns_per_ms,
-        ),
     };
 }
 
@@ -102,7 +101,6 @@ pub fn deinit(self: *Self) void {
     defer self.mutex.unlock();
     self.received.deinit();
     self.tcp.removeConnection(self);
-    self.retransmission.deinit();
     while (self.pending.pop()) |node| {
         self.allocator.free(node.data.options);
         self.allocator.destroy(node);
@@ -121,14 +119,6 @@ pub fn usableWindow(self: *Self) u16 {
     return self.context.sendWindow - @as(u16, @truncate(
         self.context.sendNext - self.context.sendUnack,
     ));
-}
-
-pub fn retransmit(self: *Self) !void {
-    while (self.retransmission.next()) |next| {
-        // TODO: make sure data this segment is not on the sendqueue already,
-        // before adding it there
-        try self.tcp.sendqueue.enqueue(self.id, next);
-    }
 }
 
 pub fn waitChange(self: *Self, state: State, timeout: isize) !State {
@@ -172,17 +162,6 @@ pub fn transmit(self: *Self, ack: ?u32, flags: TCP.Flags, data: []const u8) !voi
         std.mem.copyForwards(u8, buffer[header.dataOffset()..], data);
     }
 
-    if (!flags.rst and (!flags.ack or dataLen > 0)) {
-        self.retransmission.enqueue(
-            self.context.sendNext,
-            dataLen,
-            buffer,
-        ) catch |err| {
-            self.allocator.free(buffer);
-            return err;
-        };
-    }
-
     if (header.flags.syn and dataLen == 0) {
         // after transmiting SYN (or SYN-ACK), we increment SND.NXT by 1
         self.context.sendNext += 1;
@@ -191,10 +170,14 @@ pub fn transmit(self: *Self, ack: ?u32, flags: TCP.Flags, data: []const u8) !voi
         self.context.sendNext += @truncate(dataLen);
     }
 
-    if (self.state == .SYN_RECEIVED) {
-        try self.tcp.ip.send(null, self.id.saddr, .TCP, buffer);
+    if (!flags.rst and (!flags.ack or dataLen > 0)) {
+        try self.tcp.sendqueue.enqueue(
+            buffer,
+            self.id,
+            self.context.sendNext,
+        );
     } else {
-        try self.tcp.sendqueue.enqueue(self.id, buffer);
+        try self.tcp.ip.send(null, self.id.saddr, .TCP, buffer);
     }
 }
 
@@ -364,7 +347,8 @@ pub fn handleSegment(
                         self.transmit(null, .{ .rst = true }, "") catch {};
                     return;
                 }
-                self.retransmission.ack(ack);
+                //self.retransmission.ack(ack);
+                self.tcp.sendqueue.ack(self.id, ack);
                 self.context.sendUnack = ack;
             }
             if (segment.header.flags.rst) {
@@ -430,7 +414,8 @@ pub fn handleSegment(
                     self.reset(segment, false);
                     return;
                 }
-                self.retransmission.ack(ack);
+                self.tcp.sendqueue.ack(self.id, ack);
+                // self.retransmission.ack(ack);
                 self.context.sendWinSeq = bigToNative(u32, segment.header.seq);
                 self.context.sendWinAck = bigToNative(u32, segment.header.ack);
                 self.context.sendWindow = bigToNative(u16, segment.header.window);
@@ -476,7 +461,12 @@ pub fn handleSegment(
             if (segment.header.flags.ack) {
                 // "if the retransmission queue is empty, the user's CLOSE can
                 // be acknowledged ("ok") but do not delete the TCB."
-                if (self.retransmission.items.len == 0) {
+                // if (self.retransmission.items.len == 0) {
+                //     self.state = .CLOSED;
+                //     self.changed.signal();
+                //     return;
+                // }
+                if (self.tcp.sendqueue.countPending(self.id) == 0) {
                     self.state = .CLOSED;
                     self.changed.signal();
                     return;
@@ -521,7 +511,7 @@ pub fn handleSegment(
                     }
                 }
 
-                self.retransmission.ack(ack);
+                self.tcp.sendqueue.ack(self.id, ack);
 
                 if (segment.data.len > 0) {
                     self.received.insert(
