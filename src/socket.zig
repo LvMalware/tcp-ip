@@ -35,30 +35,57 @@ pub fn init(allocator: std.mem.Allocator, tcp: *TCP) Self {
 }
 
 pub fn deinit(self: *Self) void {
+    self.close();
+}
+
+pub fn close(self: *Self) void {
     self.mutex.lock();
     defer self.mutex.unlock();
+    std.debug.print("Closing. State is: {}\n", .{self.state()});
+    switch (self.state()) {
+        .CLOSED, .LISTEN, .SYN_SENT => {},
+        .SYN_RECEIVED => {
+            // If no SENDs have been issued and there is no pending data to send,
+            // then form a FIN segment and send it, and enter FIN-WAIT-1 state;
+            // otherwise queue for processing after entering ESTABLISHED state.
+        },
+        .FIN_WAIT1, .FIN_WAIT2 => {
+            // Strictly speaking, this is an error and should receive a "error:
+            // connection closing" response.  An "ok" response would be
+            // acceptable, too, as long as a second FIN is not emitted (the first
+            // FIN may be retransmitted though).
+            return;
+        },
+        .CLOSING, .LAST_ACK, .TIME_WAIT => {
+            // Respond with "error:  connection closing".
+            return;
+        },
+        .ESTABLISHED => {
+            // Queue this until all preceding SENDs have been segmentized, then
+            // form a FIN segment and send it.  In any case, enter FIN-WAIT-1
+            // state.
+            self.conn.?.transmit(null, .{ .fin = true, .ack = true }, "") catch {};
+            self.conn.?.setState(.FIN_WAIT1);
+            return;
+        },
+        .CLOSE_WAIT => {
+            // Queue this request until all preceding SENDs have been
+            // segmentized; then send a FIN segment, enter CLOSING state.
+            self.conn.?.transmit(null, .{ .fin = true, .ack = true }, "") catch {};
+            self.conn.?.setState(.CLOSING);
+            std.debug.print("Waiting for state to change...\n", .{});
+            const changed = self.conn.?.waitChange(.CLOSING, -1) catch .CLOSING;
+            std.debug.print("State is now {}\n", .{changed});
+            return;
+        },
+    }
+
     if (self.conn) |conn| {
         conn.deinit();
         self.allocator.destroy(conn);
     }
-    self.conn = null;
-}
 
-pub fn close(self: *Self) void {
-    switch (self.state()) {
-        .CLOSED, .FIN_WAIT1, .FIN_WAIT2, .CLOSING, .LAST_ACK, .TIME_WAIT => {},
-        .ESTABLISHED, .SYN_RECEIVED => {
-            // wait until all sends are finished, send a FIN and enter the
-            // FIN_WAIT1 state
-        },
-        .CLOSE_WAIT => {
-            // wait until all sends are finished, send a FIN and enter the
-            // CLOSING state
-        },
-        .SYN_SENT, .LISTEN => {
-            self.deinit();
-        },
-    }
+    self.conn = null;
 }
 
 fn _accepted(self: *Self, pending: *const Connection.Incoming) !void {
@@ -201,15 +228,19 @@ pub fn read(self: *Self, buffer: []u8) !usize {
 }
 
 pub fn write(self: *Self, buffer: []const u8) !usize {
-    switch (self.state()) {
+    const current = self.state();
+    switch (current) {
         .CLOSED => return error.NotConnected,
         .FIN_WAIT1, .FIN_WAIT2, .CLOSING, .LAST_ACK, .TIME_WAIT => {
             return error.Closing;
         },
-        else => {},
+        .ESTABLISHED => {},
+        else => {
+            // wait until connection is established
+            while (try self.conn.?.waitChange(current, -1) != .ESTABLISHED) {}
+        },
     }
-    // TODO: block if events.write is 0
-    // TODO: add to outgoing buffer instead of sending right away
+
     var sent: usize = 0;
     if (self.conn) |conn| {
         const mss = conn.getMSS();

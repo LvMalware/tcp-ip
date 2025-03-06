@@ -66,7 +66,6 @@ tcp: *TCP,
 sock: *Socket,
 mutex: std.Thread.Mutex,
 state: State = .CLOSED,
-timer: std.time.Timer,
 backlog: usize,
 changed: std.Thread.Condition,
 context: Context,
@@ -82,7 +81,6 @@ pub fn init(self: *Self, allocator: std.mem.Allocator, sock: *Socket) void {
         .tcp = sock.tcp,
         .sock = sock,
         .mutex = .{},
-        .timer = undefined,
         .backlog = 128,
         .changed = .{},
         .pending = .{},
@@ -129,6 +127,13 @@ pub fn waitChange(self: *Self, state: State, timeout: isize) !State {
     return self.state;
 }
 
+pub fn setState(self: *Self, state: State) void {
+    self.mutex.lock();
+    defer self.mutex.unlock();
+    self.state = state;
+    self.changed.signal();
+}
+
 pub fn transmit(self: *Self, ack: ?u32, flags: TCP.Flags, data: []const u8) !void {
     // TODO: check usable window
     if (@sizeOf(TCP.Header) + data.len > self.context.mss)
@@ -136,7 +141,7 @@ pub fn transmit(self: *Self, ack: ?u32, flags: TCP.Flags, data: []const u8) !voi
 
     var header = std.mem.zeroInit(TCP.Header, .{
         .seq = nativeToBig(u32, self.context.sendNext),
-        .ack = nativeToBig(u32, ack orelse 0),
+        .ack = nativeToBig(u32, ack orelse self.context.recvNext),
         .csum = 0,
         .flags = flags,
         .sport = self.id.dport,
@@ -322,6 +327,8 @@ pub fn handleSegment(
         self.mutex.unlock();
     }
 
+    std.debug.print("State {}, received: {}\n", .{ self.state, segment.header.flags });
+
     const isAcceptable = self.acceptable(segment);
 
     switch (self.state) {
@@ -399,9 +406,19 @@ pub fn handleSegment(
 
     switch (self.state) {
         .CLOSING => {
+            // TODO: this should include text processing
             if (segment.header.flags.rst) {
                 self.state = .CLOSED;
                 self.changed.signal();
+            }
+            if (segment.header.flags.ack) {
+                const ack = bigToNative(u32, segment.header.ack);
+                if (self.context.sendUnack <= ack) {
+                    std.debug.print("Here?\n", .{});
+                    self.state = .TIME_WAIT;
+                    self.changed.signal();
+                }
+                self.tcp.sendqueue.ack(self.id, ack);
             }
         },
         .SYN_RECEIVED => {
@@ -443,7 +460,6 @@ pub fn handleSegment(
                 // fin retransmitted
                 self.acknowledge(segment, "");
                 self.state = .CLOSE_WAIT;
-                self.timer.reset();
                 self.changed.signal();
             }
         },
@@ -451,10 +467,13 @@ pub fn handleSegment(
             if (segment.header.flags.fin) {
                 self.state = .TIME_WAIT;
                 self.changed.signal();
-                self.timer = std.time.Timer.start() catch unreachable;
             } else if (segment.header.flags.ack) {
-                self.state = .FIN_WAIT2;
-                self.changed.signal();
+                const ack = bigToNative(u32, segment.header.ack);
+                if (ack >= self.context.sendUnack) {
+                    self.state = .FIN_WAIT2;
+                    self.changed.signal();
+                }
+                self.tcp.sendqueue.ack(self.id, ack);
             }
         },
         .FIN_WAIT2 => {
@@ -475,11 +494,11 @@ pub fn handleSegment(
             if (segment.header.flags.fin) {
                 self.state = .TIME_WAIT;
                 self.changed.signal();
-                self.timer = std.time.Timer.start() catch unreachable;
             }
         },
         .CLOSE_WAIT => {
             // a FIN has been received...
+            std.debug.print("Recevied packet in CLOSE_WAIT state: {}\n", .{segment});
             return;
         },
         .ESTABLISHED => {
