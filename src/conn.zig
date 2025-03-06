@@ -323,11 +323,7 @@ pub fn handleSegment(
     segment: *const TCP.Segment,
 ) void {
     self.mutex.lock();
-    defer {
-        self.mutex.unlock();
-    }
-
-    std.debug.print("State {}, received: {}\n", .{ self.state, segment.header.flags });
+    defer self.mutex.unlock();
 
     const isAcceptable = self.acceptable(segment);
 
@@ -406,7 +402,7 @@ pub fn handleSegment(
 
     switch (self.state) {
         .CLOSING => {
-            // TODO: this should include text processing
+            // TODO: process segment text (like in ESTABLISHED)
             if (segment.header.flags.rst) {
                 self.state = .CLOSED;
                 self.changed.signal();
@@ -414,7 +410,6 @@ pub fn handleSegment(
             if (segment.header.flags.ack) {
                 const ack = bigToNative(u32, segment.header.ack);
                 if (self.context.sendUnack <= ack) {
-                    std.debug.print("Here?\n", .{});
                     self.state = .TIME_WAIT;
                     self.changed.signal();
                 }

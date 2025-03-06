@@ -41,7 +41,6 @@ pub fn deinit(self: *Self) void {
 pub fn close(self: *Self) void {
     self.mutex.lock();
     defer self.mutex.unlock();
-    std.debug.print("Closing. State is: {}\n", .{self.state()});
     switch (self.state()) {
         .CLOSED, .LISTEN, .SYN_SENT => {},
         .SYN_RECEIVED => {
@@ -73,9 +72,7 @@ pub fn close(self: *Self) void {
             // segmentized; then send a FIN segment, enter CLOSING state.
             self.conn.?.transmit(null, .{ .fin = true, .ack = true }, "") catch {};
             self.conn.?.setState(.CLOSING);
-            std.debug.print("Waiting for state to change...\n", .{});
-            const changed = self.conn.?.waitChange(.CLOSING, -1) catch .CLOSING;
-            std.debug.print("State is now {}\n", .{changed});
+            _ = self.conn.?.waitChange(.CLOSING, -1) catch unreachable;
             return;
         },
     }
