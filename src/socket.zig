@@ -47,6 +47,18 @@ pub fn close(self: *Self) void {
             // If no SENDs have been issued and there is no pending data to send,
             // then form a FIN segment and send it, and enter FIN-WAIT-1 state;
             // otherwise queue for processing after entering ESTABLISHED state.
+            if (self.conn) |conn| {
+                if (self.tcp.sendqueue.countPending(conn.id) >= 0) {
+                    _ = conn.waitChange(.SYN_RECEIVED, -1) catch {};
+                }
+                conn.transmit(
+                    null,
+                    .{ .fin = true, .ack = true },
+                    "",
+                ) catch {};
+                conn.setState(.FIN_WAIT1);
+            }
+            return;
         },
         .FIN_WAIT1, .FIN_WAIT2 => {
             // Strictly speaking, this is an error and should receive a "error:
@@ -63,14 +75,22 @@ pub fn close(self: *Self) void {
             // Queue this until all preceding SENDs have been segmentized, then
             // form a FIN segment and send it.  In any case, enter FIN-WAIT-1
             // state.
-            self.conn.?.transmit(null, .{ .fin = true, .ack = true }, "") catch {};
+            self.conn.?.transmit(
+                null,
+                .{ .fin = true, .ack = true },
+                "",
+            ) catch {};
             self.conn.?.setState(.FIN_WAIT1);
             return;
         },
         .CLOSE_WAIT => {
             // Queue this request until all preceding SENDs have been
             // segmentized; then send a FIN segment, enter CLOSING state.
-            self.conn.?.transmit(null, .{ .fin = true, .ack = true }, "") catch {};
+            self.conn.?.transmit(
+                null,
+                .{ .fin = true, .ack = true },
+                "",
+            ) catch {};
             self.conn.?.setState(.CLOSING);
             _ = self.conn.?.waitChange(.CLOSING, -1) catch unreachable;
             return;
@@ -122,6 +142,7 @@ fn _accepted(self: *Self, pending: *const Connection.Incoming) !void {
             .{ .doff = @truncate(doff / 4), .ack = true, .syn = true },
             mss,
         );
+
         // wait for ACK to establish connection
         if (try conn.waitChange(.SYN_RECEIVED, -1) == .CLOSED)
             return error.AcceptFailed;

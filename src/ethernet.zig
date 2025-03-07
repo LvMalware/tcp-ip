@@ -103,5 +103,7 @@ pub fn transmit(self: *Self, data: []const u8, dmac: [6]u8, _type: EtherType) !v
         std.mem.byteSwapAllFields(Header, &frame.header);
     }
 
-    _ = try self.dev.write(&std.mem.toBytes(frame));
+    const size = @sizeOf(Header) + data.len;
+
+    _ = try self.dev.write(std.mem.toBytes(frame)[0..size]);
 }

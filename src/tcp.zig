@@ -304,11 +304,11 @@ pub fn handle(self: *Self, packet: *const IPv4.Packet) void {
         .dport = segment.header.dport,
         .daddr = packet.header.daddr,
     })) |conn| {
-        std.debug.print("Delivering packet to passive connection\n", .{});
         if (segment.header.flags.syn) {
+            std.debug.print("Delivering packet to passive connection\n", .{});
             conn.handleSegment(&packet.header, &segment);
+            return;
         }
-        return;
     }
     std.debug.print("Discarding packet with RST\n", .{});
 
