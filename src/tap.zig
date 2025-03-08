@@ -5,9 +5,9 @@ const native_endian = @import("builtin").target.cpu.arch.endian();
 const Utils = @import("utils.zig");
 
 const IFF_UP: u16 = 0x0001;
-const IFF_TAP: i16 = 0x0002;
-const IFF_NO_PI: i16 = 0x1000;
-const IFF_RUNNING: i16 = 0x0040;
+const IFF_TAP: u16 = 0x0002;
+const IFF_NO_PI: u16 = 0x1000;
+const IFF_RUNNING: u16 = 0x0040;
 
 const TUNSETIFF: u32 = 0x400454ca;
 const SIOCSIFADDR: u32 = 0x8916;
@@ -37,7 +37,8 @@ pub const Device = struct {
         };
 
         if (ifname) |name| std.mem.copyForwards(u8, ifr.ifrn.name[0..], name);
-        ifr.ifru.flags = IFF_TAP | IFF_NO_PI;
+        const flags: u16 = IFF_TAP | IFF_NO_PI;
+        ifr.ifru.flags = @as(*const linux.IFF, @ptrCast(&flags)).*; //IFF_TAP | IFF_NO_PI;
 
         if (linux.ioctl(dev.fd, TUNSETIFF, @intFromPtr(&ifr)) != 0) {
             std.posix.close(dev.fd);
@@ -104,7 +105,7 @@ pub const Device = struct {
             return error.IFNETMASK;
         }
 
-        ifr.ifru.flags = IFF_UP;
+        ifr.ifru.flags = @as(*const linux.IFF, @ptrCast(&IFF_UP)).*;
 
         if (linux.ioctl(sock, SIOCSIFFLAGS, @intFromPtr(&ifr)) != 0) {
             return error.IFUP;

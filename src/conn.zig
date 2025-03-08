@@ -69,7 +69,7 @@ state: State = .CLOSED,
 backlog: usize,
 changed: std.Thread.Condition,
 context: Context,
-pending: std.TailQueue(Incoming),
+pending: std.DoublyLinkedList(Incoming),
 received: Sorted,
 allocator: std.mem.Allocator,
 
@@ -208,7 +208,7 @@ fn addPending(
     }
 
     const node = self.allocator.create(
-        std.TailQueue(Incoming).Node,
+        std.DoublyLinkedList(Incoming).Node,
     ) catch return;
 
     node.data = .{

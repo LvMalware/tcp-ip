@@ -2,7 +2,7 @@ const std = @import("std");
 const Connection = @import("conn.zig");
 
 const Self = @This();
-const Node = std.TailQueue(Item).Node;
+const Node = std.DoublyLinkedList(Item).Node;
 
 const Item = struct {
     id: Connection.Id,
@@ -15,7 +15,7 @@ const Item = struct {
 rto: usize,
 timer: std.time.Timer,
 mutex: std.Thread.Mutex,
-queue: std.TailQueue(Item),
+queue: std.DoublyLinkedList(Item),
 pending: std.Thread.Condition,
 allocator: std.mem.Allocator,
 

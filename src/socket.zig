@@ -35,7 +35,18 @@ pub fn init(allocator: std.mem.Allocator, tcp: *TCP) Self {
 }
 
 pub fn deinit(self: *Self) void {
+    var old = self.state();
     self.close();
+    if (self.conn) |conn| {
+        while (old != .CLOSED) {
+            // TODO: TIME_WAIT
+            std.debug.print("Looping on deinit: {}...\n", .{old});
+            old = conn.waitChange(old, -1) catch continue;
+        }
+        conn.deinit();
+        self.allocator.destroy(conn);
+        self.conn = null;
+    }
 }
 
 pub fn close(self: *Self) void {
