@@ -12,10 +12,17 @@ const Item = struct {
     segment: []const u8,
 };
 
+fn compare(context: bool, a: Item, b: Item) std.math.Order {
+    _ = .{context}; // unused context
+    return std.math.order(a.timeout, b.timeout);
+}
+
+const Queue = std.PriorityQueue(Item, bool, compare);
+
 rto: usize,
 timer: std.time.Timer,
 mutex: std.Thread.Mutex,
-queue: std.DoublyLinkedList(Item),
+queue: Queue,
 pending: std.Thread.Condition,
 allocator: std.mem.Allocator,
 
@@ -24,7 +31,7 @@ pub fn init(allocator: std.mem.Allocator, rto: usize) Self {
         .rto = rto,
         .timer = std.time.Timer.start() catch unreachable,
         .mutex = .{},
-        .queue = .{},
+        .queue = Queue.init(allocator, true),
         .pending = .{},
         .allocator = allocator,
     };
@@ -33,25 +40,10 @@ pub fn init(allocator: std.mem.Allocator, rto: usize) Self {
 pub fn deinit(self: *Self) void {
     self.mutex.lock();
     defer self.mutex.unlock();
-    while (self.queue.popFirst()) |item| {
-        self.allocator.free(item.data.segment);
-        self.allocator.destroy(item);
+    while (self.queue.removeOrNull()) |item| {
+        self.allocator.free(item.segment);
     }
-    self.pending.signal();
-}
-
-pub fn insert(self: *Self, node: *Node) void {
-    self.mutex.lock();
-    defer self.mutex.unlock();
-    var item = self.queue.first;
-    while (item != null) : (item = item.?.next) {
-        if (item.?.data.timeout > node.data.timeout) {
-            self.queue.insertBefore(item.?, node);
-            return;
-        }
-    }
-    self.queue.append(node);
-    // signal pending so dequeue() will unlock when queue is currently empty
+    self.queue.deinit();
     self.pending.signal();
 }
 
@@ -59,28 +51,22 @@ pub fn dequeue(self: *Self) ?Item {
     self.mutex.lock();
     defer self.mutex.unlock();
 
-    while (self.queue.first == null) {
+    while (self.queue.peek() == null) {
         self.pending.wait(&self.mutex);
     }
 
-    while (self.queue.first.?.data.timeout > self.timer.read()) {
-        self.pending.timedWait(
-            &self.mutex,
-            self.queue.first.?.data.timeout - self.timer.read(),
-        ) catch {};
-        if (self.queue.first == null) return null;
+    var diff = @subWithOverflow(self.queue.peek().?.timeout, self.timer.read());
+    while (diff[1] == 0 and diff[0] != 0) {
+        self.pending.timedWait(&self.mutex, diff[0]) catch {};
+        if (self.queue.peek() == null) return null;
+        diff = @subWithOverflow(self.queue.peek().?.timeout, self.timer.read());
     }
 
-    if (self.queue.popFirst()) |node| {
-        node.data.ret += 1;
-        node.data.timeout += node.data.ret * self.rto * std.time.ns_per_ms;
-        self.queue.append(node);
-
-        // TODO: if node.data.ret > some limit, discard packet / reset connection
-
-        return node.data;
-    }
-    return null;
+    var next = self.queue.remove();
+    next.ret += 1;
+    next.timeout = self.timer.read() + next.ret * self.rto * std.time.ns_per_ms;
+    self.queue.add(next) catch {};
+    return next;
 }
 
 pub fn enqueue(
@@ -91,37 +77,32 @@ pub fn enqueue(
 ) !void {
     self.mutex.lock();
     defer self.mutex.unlock();
-    const node = try self.allocator.create(Node);
-    node.data = .{
+    try self.queue.add(.{
         .id = id,
         .end = end,
         .timeout = self.timer.read(),
         .segment = segment,
-    };
-    if (self.queue.first) |first| {
-        self.queue.insertBefore(first, node);
-    } else {
-        self.queue.append(node);
-    }
+    });
     self.pending.signal();
 }
 
 pub fn ack(self: *Self, id: Connection.Id, seq: u32) void {
     self.mutex.lock();
     defer self.mutex.unlock();
-    const count = self.queue.len;
-    var item = self.queue.first;
-    while (item != null) {
-        const next = item.?.next;
-        if (item.?.data.id.eql(id) and item.?.data.end <= seq) {
-            self.queue.remove(item.?);
-            self.allocator.free(item.?.data.segment);
-            self.allocator.destroy(item.?);
+    const count = self.queue.count();
+    var index: usize = 0;
+    while (index < self.queue.count()) {
+        if (self.queue.items[index].id.eql(id) and
+            self.queue.items[index].end <= seq)
+        {
+            const item = self.queue.removeIndex(index);
+            self.allocator.free(item.segment);
+            continue;
         }
-        item = next;
+        index += 1;
     }
     // signal pending to avoid dequeue() waiting to retransmit ACKed segments
-    if (count > self.queue.len) self.pending.signal();
+    if (count > self.queue.count()) self.pending.signal();
 }
 
 pub fn countPending(self: *Self, id: Connection.Id) usize {
@@ -130,9 +111,9 @@ pub fn countPending(self: *Self, id: Connection.Id) usize {
 
     var count: usize = 0;
 
-    var item = self.queue.first;
-    while (item != null) : (item = item.?.next) {
-        if (item.?.data.id.eql(id)) count += 1;
+    var iter = self.queue.iterator();
+    while (iter.next()) |item| {
+        if (item.id.eql(id)) count += 1;
     }
     return count;
 }
