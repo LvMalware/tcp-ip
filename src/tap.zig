@@ -37,8 +37,8 @@ pub const Device = struct {
         };
 
         if (ifname) |name| std.mem.copyForwards(u8, ifr.ifrn.name[0..], name);
-        const flags: u16 = IFF_TAP | IFF_NO_PI;
-        ifr.ifru.flags = @as(*const linux.IFF, @ptrCast(&flags)).*; //IFF_TAP | IFF_NO_PI;
+
+        @as(*u16, @ptrCast(&ifr.ifru.flags)).* = IFF_TAP | IFF_NO_PI;
 
         if (linux.ioctl(dev.fd, TUNSETIFF, @intFromPtr(&ifr)) != 0) {
             std.posix.close(dev.fd);

@@ -78,7 +78,12 @@ pub fn close(self: *Self) void {
             // FIN may be retransmitted though).
             return;
         },
-        .CLOSING, .LAST_ACK, .TIME_WAIT => {
+        .LAST_ACK => {
+            std.debug.assert(
+                self.conn.?.waitChange(.LAST_ACK, -1) catch .CLOSED == .CLOSED,
+            );
+        },
+        .CLOSING, .TIME_WAIT => {
             // Respond with "error:  connection closing".
             return;
         },
@@ -102,8 +107,8 @@ pub fn close(self: *Self) void {
                 .{ .fin = true, .ack = true },
                 "",
             ) catch {};
-            self.conn.?.setState(.CLOSING);
-            _ = self.conn.?.waitChange(.CLOSING, -1) catch unreachable;
+            // self.conn.?.setState(.CLOSING);
+            _ = self.conn.?.waitChange(.LAST_ACK, -1) catch unreachable;
             return;
         },
     }

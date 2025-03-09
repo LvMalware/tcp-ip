@@ -136,6 +136,7 @@ pub fn setState(self: *Self, state: State) void {
 
 pub fn transmit(self: *Self, ack: ?u32, flags: TCP.Flags, data: []const u8) !void {
     // TODO: check usable window
+
     if (@sizeOf(TCP.Header) + data.len > self.context.mss)
         return error.SegmentTooBig;
 
@@ -173,6 +174,13 @@ pub fn transmit(self: *Self, ack: ?u32, flags: TCP.Flags, data: []const u8) !voi
     } else {
         // only increment snd.nxt by the amount of data sent
         self.context.sendNext += @truncate(dataLen);
+    }
+
+    if (flags.fin) {
+        if (self.state == .CLOSE_WAIT) {
+            self.state = .LAST_ACK;
+            self.changed.signal();
+        }
     }
 
     if (!flags.rst and (!flags.ack or dataLen > 0)) {
@@ -435,7 +443,13 @@ pub fn handleSegment(
             return;
         },
         .LAST_ACK => {
-            if (segment.header.flags.rst or segment.header.flags.ack) {
+            const fin_ack = if (segment.header.flags.ack) isfinack: {
+                const ack = bigToNative(u32, segment.header.ack);
+                if (ack >= self.context.sendUnack) break :isfinack true;
+                break :isfinack false;
+            } else false;
+
+            if (segment.header.flags.rst or fin_ack) {
                 self.state = .CLOSED;
                 self.changed.signal();
             }
@@ -449,27 +463,51 @@ pub fn handleSegment(
             }
 
             if (segment.header.flags.fin) {
-                // fin retransmitted
                 self.acknowledge(segment, "");
+                // TODO: check this with RFC 1122 (RFC 793 is a mess)
                 self.state = .CLOSE_WAIT;
                 self.changed.signal();
             }
         },
         .FIN_WAIT1 => {
-            if (segment.header.flags.fin) {
-                self.state = .TIME_WAIT;
-                self.changed.signal();
-            } else if (segment.header.flags.ack) {
-                const ack = bigToNative(u32, segment.header.ack);
-                if (ack >= self.context.sendUnack) {
+            if (!segment.header.flags.ack) {
+                // a FIN without ACK is theoretically possible, but in this
+                // implementation it is considered invalid and will be ignored
+                return;
+            }
+
+            const ack = bigToNative(u32, segment.header.ack);
+            self.tcp.sendqueue.ack(self.id, ack);
+
+            const fin_ack = ack >= self.context.sendUnack;
+
+            if (!segment.header.flags.fin) {
+                if (fin_ack) {
                     self.state = .FIN_WAIT2;
                     self.changed.signal();
                 }
-                self.tcp.sendqueue.ack(self.id, ack);
+                return;
             }
+
+            if (fin_ack) {
+                // TODO: start 2MSL timer
+                self.state = .TIME_WAIT;
+                self.changed.signal();
+                return;
+            }
+
+            self.acknowledge(segment, "");
+            self.state = .CLOSING;
+            self.changed.signal();
         },
         .FIN_WAIT2 => {
             if (segment.header.flags.ack) {
+                const fin_ack = isfinack: {
+                    const ack = bigToNative(u32, segment.header.ack);
+                    self.tcp.sendqueue.ack(self.id, ack);
+                    if (ack >= self.context.sendUnack) break :isfinack true;
+                    break :isfinack false;
+                };
                 // "if the retransmission queue is empty, the user's CLOSE can
                 // be acknowledged ("ok") but do not delete the TCB."
                 // if (self.retransmission.items.len == 0) {
@@ -477,7 +515,7 @@ pub fn handleSegment(
                 //     self.changed.signal();
                 //     return;
                 // }
-                if (self.tcp.sendqueue.countPending(self.id) == 0) {
+                if (fin_ack and self.tcp.sendqueue.countPending(self.id) == 0) {
                     self.state = .CLOSED;
                     self.changed.signal();
                     return;
@@ -490,7 +528,6 @@ pub fn handleSegment(
         },
         .CLOSE_WAIT => {
             // a FIN has been received...
-            std.debug.print("Recevied packet in CLOSE_WAIT state: {}\n", .{segment});
             return;
         },
         .ESTABLISHED => {
@@ -510,8 +547,8 @@ pub fn handleSegment(
                     self.context.sendUnack = ack;
                     if (ack < self.context.sendNext and
                         (self.context.sendWinSeq < seq or
-                        (self.context.sendWinSeq == seq and
-                        self.context.sendWinAck <= ack)))
+                            (self.context.sendWinSeq == seq and
+                                self.context.sendWinAck <= ack)))
                     {
                         self.context.sendWinSeq = seq;
                         self.context.sendWinAck = ack;
