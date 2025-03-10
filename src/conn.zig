@@ -5,14 +5,17 @@ const nativeToBig = std.mem.nativeToBig;
 
 const TCP = @import("tcp.zig");
 const IPv4 = @import("ipv4.zig");
-// const Queue = @import("queue.zig");
 const Socket = @import("socket.zig");
 const Sorted = @import("sorted.zig");
 const Option = @import("options.zig").Option;
 
 const Self = @This();
 
+// maximum segment lifetime
+pub const default_msl = 2 * std.time.ns_per_m;
+// maximum segment size
 pub const default_mss = 1460;
+// receive window size
 pub const default_window = 64256;
 
 pub const Id = struct {
@@ -108,8 +111,6 @@ pub fn deinit(self: *Self) void {
 }
 
 pub fn getMSS(self: *Self) u16 {
-    self.mutex.lock();
-    defer self.mutex.unlock();
     return self.context.mss - @sizeOf(TCP.Header);
 }
 
@@ -414,7 +415,7 @@ pub fn handleSegment(
             }
             if (segment.header.flags.ack) {
                 const ack = bigToNative(u32, segment.header.ack);
-                if (self.context.sendUnack <= ack) {
+                if (self.context.sendNext <= ack) {
                     self.state = .TIME_WAIT;
                     self.changed.signal();
                 }
@@ -445,7 +446,7 @@ pub fn handleSegment(
         .LAST_ACK => {
             const fin_ack = if (segment.header.flags.ack) isfinack: {
                 const ack = bigToNative(u32, segment.header.ack);
-                if (ack >= self.context.sendUnack) break :isfinack true;
+                if (ack >= self.context.sendNext) break :isfinack true;
                 break :isfinack false;
             } else false;
 
@@ -479,7 +480,7 @@ pub fn handleSegment(
             const ack = bigToNative(u32, segment.header.ack);
             self.tcp.sendqueue.ack(self.id, ack);
 
-            const fin_ack = ack >= self.context.sendUnack;
+            const fin_ack = ack >= self.context.sendNext;
 
             if (!segment.header.flags.fin) {
                 if (fin_ack) {
@@ -505,7 +506,7 @@ pub fn handleSegment(
                 const fin_ack = isfinack: {
                     const ack = bigToNative(u32, segment.header.ack);
                     self.tcp.sendqueue.ack(self.id, ack);
-                    if (ack >= self.context.sendUnack) break :isfinack true;
+                    if (ack >= self.context.sendNext) break :isfinack true;
                     break :isfinack false;
                 };
                 // "if the retransmission queue is empty, the user's CLOSE can
@@ -542,6 +543,7 @@ pub fn handleSegment(
                     self.acknowledge(segment, "");
                     return;
                 } else if (ack < self.context.sendUnack) {
+                    // Maybe we retransmitted a packet already ACKed?
                     std.debug.print("Warning: ACK is less than sendUnack!\n", .{});
                 } else if (self.context.sendUnack < ack) {
                     self.context.sendUnack = ack;
