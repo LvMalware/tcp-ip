@@ -67,7 +67,6 @@ pub fn close(self: *Self) void {
                     .{ .fin = true, .ack = true },
                     "",
                 ) catch {};
-                conn.setState(.FIN_WAIT1);
             }
             return;
         },
@@ -96,7 +95,6 @@ pub fn close(self: *Self) void {
                 .{ .fin = true, .ack = true },
                 "",
             ) catch {};
-            self.conn.?.setState(.FIN_WAIT1);
             return;
         },
         .CLOSE_WAIT => {
@@ -107,7 +105,6 @@ pub fn close(self: *Self) void {
                 .{ .fin = true, .ack = true },
                 "",
             ) catch {};
-            // self.conn.?.setState(.CLOSING);
             _ = self.conn.?.waitChange(.LAST_ACK, -1) catch unreachable;
             return;
         },

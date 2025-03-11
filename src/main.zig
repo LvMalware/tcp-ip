@@ -29,6 +29,7 @@ pub fn serverLoop(allocator: std.mem.Allocator, tcp: *TCP) void {
         std.debug.print("[Server] Received: {s}\n", .{buffer[0..size]});
         _ = client.write(buffer[0..size]) catch {};
     }
+
     std.debug.print("Client disconnected. Finishing...\n", .{});
 }
 

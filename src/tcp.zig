@@ -289,14 +289,13 @@ pub fn handle(self: *Self, packet: *const IPv4.Packet) void {
         segment.header.flags.fin,
         segment.header.flags.rst,
     });
-    const id: ConnKey = .{
+
+    if (self.connections.get(.{
         .saddr = packet.header.saddr,
         .sport = segment.header.sport,
         .daddr = packet.header.daddr,
         .dport = segment.header.dport,
-    };
-
-    if (self.connections.get(id)) |conn| {
+    })) |conn| {
         std.debug.print("Delivering packet to active connection\n", .{});
         conn.handleSegment(&packet.header, &segment);
         return;
