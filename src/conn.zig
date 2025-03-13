@@ -129,13 +129,6 @@ pub fn waitChange(self: *Self, state: State, timeout: isize) !State {
     return self.state;
 }
 
-pub fn setState(self: *Self, state: State) void {
-    self.mutex.lock();
-    defer self.mutex.unlock();
-    self.state = state;
-    self.changed.signal();
-}
-
 pub fn transmit(self: *Self, ack: ?u32, flags: TCP.Flags, data: []const u8) !void {
     // TODO: check usable window
 
@@ -218,11 +211,7 @@ pub fn nextPending(self: *Self) ?Incoming {
     return null;
 }
 
-fn addPending(
-    self: *Self,
-    ip: *const IPv4.Header,
-    seg: *const TCP.Segment,
-) !void {
+fn addPending(self: *Self, ip: *const IPv4.Header, seg: *const TCP.Segment) !void {
     var next = self.pending.first;
     while (next != null) : (next = next.?.next) {
         if (ip.saddr == next.?.data.id.saddr and seg.sport == next.?.data.id.sport)
@@ -266,30 +255,6 @@ pub fn setPassive(self: *Self, addr: u32, port: u16, backlog: usize) !void {
     try self.tcp.addConnection(self);
 }
 
-pub fn setActive(
-    self: *Self,
-    state: State,
-    saddr: u32,
-    sport: u16,
-    daddr: u32,
-    dport: u16,
-) !void {
-    if (self.state != .CLOSED) return error.ConnectionReused;
-    self.id = .{
-        .sport = sport,
-        .saddr = saddr,
-        .dport = dport,
-        .daddr = daddr,
-    };
-    self.state = state;
-    self.changed.signal();
-    self.tcp.addConnection(self) catch {
-        self.state = .CLOSED;
-        self.changed.signal();
-        return;
-    };
-}
-
 pub fn acceptable(self: Self, segment: *const TCP.Segment) bool {
     const winLimit = self.context.recvNext + self.context.recvWindow;
 
@@ -311,7 +276,6 @@ pub fn acknowledge(self: *Self, seg: *const TCP.Segment) void {
 
     if (seg.flags.fin) seq += 1;
     if (seq > self.context.recvNext) self.context.recvNext = @truncate(seq);
-    std.debug.print("Sending ACK for {}\n", .{seq});
 
     self.transmit(@truncate(seq), .{ .ack = true }, "") catch {};
 }
@@ -369,6 +333,9 @@ pub fn handleSegment(self: *Self, ip: *const IPv4.Header, segment: *const TCP.Se
                     self.changed.signal();
                     self.transmit(self.context.recvNext, .{ .ack = true, .syn = true }, "") catch {};
                 }
+                self.context.sendWinSeq = segment.seq;
+                self.context.sendWinAck = segment.ack;
+                self.context.sendWindow = bigToNative(u16, segment.window);
             }
             return;
         },
@@ -401,6 +368,7 @@ pub fn handleSegment(self: *Self, ip: *const IPv4.Header, segment: *const TCP.Se
         .CLOSING => {
             // TODO: process segment text (like in ESTABLISHED)
             if (self.context.sendNext <= ack) {
+                // TODO: start 2 MSL timeout
                 self.state = .TIME_WAIT;
                 self.changed.signal();
             }
@@ -427,13 +395,8 @@ pub fn handleSegment(self: *Self, ip: *const IPv4.Header, segment: *const TCP.Se
             }
         },
         .TIME_WAIT => {
-            // TODO: check timer to close connection after 2 MSL
-
             if (segment.flags.fin) {
-                // self.acknowledge(segment);
-                // TODO: check this with RFC 1122 (RFC 793 is a mess)
-                // self.state = .CLOSE_WAIT;
-                // self.changed.signal();
+                // TODO: restart 2 MSL timeout
             }
         },
         .FIN_WAIT1 => {
@@ -441,10 +404,12 @@ pub fn handleSegment(self: *Self, ip: *const IPv4.Header, segment: *const TCP.Se
             // implementation it is considered invalid and will be ignored
             if (!segment.flags.ack) return;
 
+            // TODO: process text segment like in established
+
             if (segment.flags.fin) {
                 // Both sides are trying to close simultaneously
                 self.acknowledge(segment);
-                self.state = .CLOSING;
+                self.state = if (ack >= self.context.sendNext) .TIME_WAIT else .CLOSING;
                 self.changed.signal();
                 return;
             }
@@ -456,11 +421,13 @@ pub fn handleSegment(self: *Self, ip: *const IPv4.Header, segment: *const TCP.Se
         },
         .FIN_WAIT2 => {
             if (!segment.flags.ack) return;
+            // TODO: process text segment like in established
 
             // "if the retransmission queue is empty, the user's CLOSE can
             // be acknowledged ("ok") but do not delete the TCB."
 
             if (segment.flags.fin) {
+                // TODO: start 2 MSL timeout
                 self.state = .TIME_WAIT;
                 self.changed.signal();
                 self.acknowledge(segment);
@@ -468,31 +435,26 @@ pub fn handleSegment(self: *Self, ip: *const IPv4.Header, segment: *const TCP.Se
             }
 
             if (ack >= self.context.sendNext and self.tcp.sendqueue.countPending(self.id) == 0) {
+                // TODO: start 2 MSL timeout
                 self.state = .TIME_WAIT;
                 self.changed.signal();
                 return;
             }
         },
-        .CLOSE_WAIT => {
-            // a FIN has been received...
-
-            return;
-        },
-        .ESTABLISHED => {
+        .CLOSE_WAIT, .ESTABLISHED => {
             // TODO: most of the states above also share the code below, so
             // maybe we can move it outisde the switch statement
             if (segment.flags.ack) {
                 const seq = segment.seq;
                 if (ack > self.context.sendNext) {
                     // TODO: send ACK
-                    std.debug.print("Warning: ACK is bigger than sendNext!\n", .{});
+                    std.debug.print("[TCB] Warning: ACK is bigger than sendNext!\n", .{});
                     self.acknowledge(segment);
                     return;
                 } else if (ack < self.context.sendUnack) {
                     // Maybe we retransmitted a packet already ACKed?
-                    std.debug.print("Warning: ACK is less than sendUnack!\n", .{});
+                    std.debug.print("[TCB] Warning: ACK is less than sendUnack!\n", .{});
                 } else if (self.context.sendUnack < ack) {
-                    // self.context.sendUnack = ack;
                     if (self.context.sendWinSeq < seq or (self.context.sendWinSeq == seq and self.context.sendWinAck <= ack)) {
                         self.context.sendWinSeq = seq;
                         self.context.sendWinAck = ack;

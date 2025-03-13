@@ -11,8 +11,14 @@
 
 - Review the whole implementation to fix mistakes of RFC 793 by following RFC 1122 and later erratas
 
+- Handle Urgent data on the TCP
+
+- Implement IP options and fragmentation
+
 - Add an empty queue signal
     - Each connection can be signaled that all the segments were sent (and ACKed), so it can close
+
 - Optimize transmission queue
     - maybe have some form of poll on multiple connections to efficiently select the connection and segment to transmit instead of using a loop on the queue
 
+- Implement timeouts

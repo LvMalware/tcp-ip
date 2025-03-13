@@ -102,7 +102,7 @@ pub fn handle(self: *Self, packet: *const IPv4.Packet) void {
     const data = packet.data[@sizeOf(Header)..];
     const header = Header.fromBytes(packet.data);
     const htype = ICMPType.fromInt(header.type) catch return;
-    std.debug.print("[ICMPv4] packet of type {}\n", .{htype});
+    std.debug.print("[ICMPv4] received ICMP {s}\n", .{@tagName(htype)});
     switch (htype) {
         .ECHO => {
             self.echoReply(

@@ -133,14 +133,15 @@ fn _accepted(self: *Self, pending: *const Connection.Incoming) !void {
                 else => continue,
             }
         }
+
+        conn.id = pending.id;
+        conn.state = .SYN_RECEIVED;
         conn.context.recvNext = conn.context.irs + 1;
-        try conn.setActive(
-            .SYN_RECEIVED,
-            pending.id.saddr,
-            pending.id.sport,
-            pending.id.daddr,
-            pending.id.dport,
-        );
+
+        self.tcp.addConnection(conn) catch |err| {
+            conn.deinit();
+            return err;
+        };
 
         const opt = Options.MSSOption{
             .data = conn.context.mss,
@@ -198,13 +199,20 @@ pub fn connect(self: *Self, host: []const u8, port: u16) !void {
     );
     if (self.conn) |conn| {
         conn.init(self.allocator, self);
-        try conn.setActive(
-            .SYN_SENT,
-            self.addr,
-            self.port,
-            self.tcp.ip.ethernet.dev.ipaddr,
-            sport,
-        );
+
+        conn.id = .{
+            .daddr = self.tcp.ip.ethernet.dev.ipaddr,
+            .dport = sport,
+            .saddr = self.addr,
+            .sport = self.port,
+        };
+
+        conn.state = .SYN_SENT;
+
+        self.tcp.addConnection(conn) catch |err| {
+            conn.deinit();
+            return err;
+        };
 
         const opt = Options.MSSOption{
             .data = conn.context.mss,

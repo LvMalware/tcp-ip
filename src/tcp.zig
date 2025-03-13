@@ -5,7 +5,7 @@ const IPv4 = @import("ipv4.zig");
 const Option = @import("options.zig").Option;
 const Connection = @import("conn.zig");
 const ConnKey = Connection.Id;
-const SendQueue = @import("tqueue.zig"); //@import("sendqueue.zig");
+const SendQueue = @import("sendqueue.zig");
 
 const Self = @This();
 
@@ -186,7 +186,7 @@ connections: std.AutoHashMap(ConnKey, *Connection),
 pub fn init(allocator: std.mem.Allocator, ip: *IPv4, rto: usize) Self {
     return .{
         .ip = ip,
-        .rto = rto,
+        .rto = rto * std.time.ns_per_ms,
         .mutex = .{},
         .cansend = .{},
         .running = std.atomic.Value(bool).init(false),
@@ -212,16 +212,13 @@ pub fn handler(self: *Self) IPv4.Handler {
 }
 
 fn transmissionLoop(self: *Self) void {
-    std.atomic.spinLoopHint();
-    while (self.running.load(.acquire)) {
-        const item = self.sendqueue.dequeue() orelse continue;
+    while (self.sendqueue.dequeue()) |item| {
         // simulate random packet loss:
         // if (std.crypto.random.boolean()) {
-        //     std.debug.print("Losing packet {d}...\n", .{item.end});
+        //     std.debug.print("Losing packet {d}...\n", .{item.segend});
         //     continue;
         // }
-        std.debug.print("Transmitting...\n", .{});
-        self.ip.send(null, item.id.saddr, .TCP, item.segment) catch continue;
+        self.ip.send(null, item.conn.saddr, .TCP, item.segment) catch continue;
     }
 }
 
@@ -229,7 +226,7 @@ pub fn start(self: *Self) !void {
     self.mutex.lock();
     defer self.mutex.unlock();
     self.running.store(true, .release);
-    self.sendqueue = SendQueue.init(self.allocator, self.rto);
+    self.sendqueue = try SendQueue.init(self.allocator, self.rto);
     self.transmission = try std.Thread.spawn(.{}, transmissionLoop, .{self});
 }
 
@@ -237,8 +234,9 @@ pub fn stop(self: *Self) void {
     self.mutex.lock();
     defer self.mutex.unlock();
     self.running.store(false, .release);
+    self.sendqueue.deinit();
     if (self.transmission) |*thread| {
-        thread.detach();
+        thread.join();
     }
 }
 
