@@ -105,6 +105,22 @@ pub fn ack(self: *Self, id: Connection.Id, seq: u32) void {
     if (count > self.queue.count()) self.pending.signal();
 }
 
+pub fn removeAll(self: *Self, id: Connection.Id) void {
+    self.mutex.lock();
+    defer self.mutex.unlock();
+    var index: usize = 0;
+    const count = self.queue.count();
+    while (index < self.queue.count()) {
+        if (self.queue.items[index].id.eql(id)) {
+            const item = self.queue.removeIndex(index);
+            self.allocator.free(item.segment);
+            continue;
+        }
+        index += 1;
+    }
+    if (count > self.queue.count()) self.pending.signal();
+}
+
 pub fn countPending(self: *Self, id: Connection.Id) usize {
     self.mutex.lock();
     defer self.mutex.unlock();

@@ -126,7 +126,7 @@ fn _accepted(self: *Self, pending: *const Connection.Incoming) !void {
     self.conn = try self.allocator.create(Connection);
     if (self.conn) |conn| {
         conn.init(self.allocator, self);
-        conn.context.irs = std.mem.bigToNative(u32, pending.header.seq);
+        conn.context.irs = pending.header.seq;
         for (pending.options) |opt| {
             switch (opt) {
                 .MSS => |mss| conn.context.mss = mss.data,

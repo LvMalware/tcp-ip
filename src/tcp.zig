@@ -118,21 +118,30 @@ pub const Header = extern struct {
 };
 
 pub const Segment = struct {
-    header: Header,
+    sport: u16,
+    dport: u16,
+    seq: u32,
+    ack: u32,
+    flags: Flags,
+    window: u16,
+    csum: u16,
+    urgent: u16,
     options: []Option,
     data: []const u8,
 
-    pub fn fromPacket(
-        allocator: std.mem.Allocator,
-        packet: *const IPv4.Packet,
-    ) !Segment {
-        if (tcpChecksum(
-            packet.header.saddr,
-            packet.header.daddr,
-            packet.header.proto,
-            packet.data,
-        ) != 0) return error.BadChecksum;
+    pub fn fromPacket(allocator: std.mem.Allocator, packet: *const IPv4.Packet) !Segment {
+        if (tcpChecksum(packet.header.saddr, packet.header.daddr, packet.header.proto, packet.data) != 0)
+            return error.BadChecksum;
+
         const header = Header.fromBytes(packet.data);
+        var segment: Segment = undefined;
+
+        inline for (std.meta.fields(Header)) |field| {
+            @field(segment, field.name) = if (field.type == u32)
+                std.mem.bigToNative(u32, @field(header, field.name))
+            else
+                @field(header, field.name);
+        }
 
         var options = std.ArrayList(Option).init(allocator);
         defer options.deinit();
@@ -145,21 +154,22 @@ pub const Segment = struct {
             if (option == .END) break;
         }
 
-        return .{
-            .header = header,
-            .options = try allocator.dupe(Option, options.items),
-            .data = packet.data[header.dataOffset()..],
-        };
+        segment.options = try options.toOwnedSlice();
+        segment.data = packet.data[header.dataOffset()..];
+
+        return segment;
+    }
+
+    pub fn getHeader(self: Segment) Header {
+        var header: Header = undefined;
+        inline for (std.meta.fields(Header)) |field| {
+            @field(header, field.name) = @field(self, field.name);
+        }
+        return header;
     }
 
     pub fn deinit(self: Segment, allocator: std.mem.Allocator) void {
         allocator.free(self.options);
-    }
-
-    pub fn len(self: Segment) u16 {
-        return @truncate(
-            self.data.len - (self.header.dataOffset() - @sizeOf(Header)),
-        );
     }
 };
 
@@ -210,6 +220,7 @@ fn transmissionLoop(self: *Self) void {
         //     std.debug.print("Losing packet {d}...\n", .{item.end});
         //     continue;
         // }
+        std.debug.print("Transmitting...\n", .{});
         self.ip.send(null, item.id.saddr, .TCP, item.segment) catch continue;
     }
 }
@@ -231,13 +242,10 @@ pub fn stop(self: *Self) void {
     }
 }
 
-pub fn segmentRST(header: *const Header) Header {
+pub fn segmentRST(header: *const Segment) Header {
     return std.mem.zeroInit(Header, .{
         .seq = if (header.flags.ack) header.ack else 0,
-        .ack = std.mem.nativeToBig(
-            u32,
-            std.mem.bigToNative(u32, header.seq) + 1,
-        ),
+        .ack = std.mem.nativeToBig(u32, header.seq + 1),
         .sport = header.dport,
         .dport = header.sport,
         .flags = .{
@@ -281,58 +289,56 @@ pub fn handle(self: *Self, packet: *const IPv4.Packet) void {
     defer segment.deinit(self.allocator);
 
     std.debug.print("[TCP] SEQ={d}, ACK={d}, LEN={d}, SYN={}, ACK={}, FIN={}, RST={}\n", .{
-        std.mem.bigToNative(u32, segment.header.seq),
-        std.mem.bigToNative(u32, segment.header.ack),
+        segment.seq,
+        segment.ack,
         segment.data.len,
-        segment.header.flags.syn,
-        segment.header.flags.ack,
-        segment.header.flags.fin,
-        segment.header.flags.rst,
+        segment.flags.syn,
+        segment.flags.ack,
+        segment.flags.fin,
+        segment.flags.rst,
     });
 
     if (self.connections.get(.{
         .saddr = packet.header.saddr,
-        .sport = segment.header.sport,
+        .sport = segment.sport,
         .daddr = packet.header.daddr,
-        .dport = segment.header.dport,
+        .dport = segment.dport,
     })) |conn| {
-        std.debug.print("Delivering packet to active connection\n", .{});
+        // std.debug.print("Delivering packet to active connection\n", .{});
         conn.handleSegment(&packet.header, &segment);
         return;
     } else if (self.listenning.get(.{
-        .dport = segment.header.dport,
+        .dport = segment.dport,
         .daddr = packet.header.daddr,
     })) |conn| {
-        if (segment.header.flags.syn) {
-            std.debug.print("Delivering packet to passive connection\n", .{});
+        if (segment.flags.syn) {
+            // std.debug.print("Delivering packet to passive connection\n", .{});
             conn.handleSegment(&packet.header, &segment);
             return;
         }
     }
-    std.debug.print("Discarding packet with RST\n", .{});
+
+    std.debug.print("[TCP] Discarding packet with RST\n", .{});
 
     // "If the state is CLOSED (i.e., TCB does not exist) then all data in the
     // incoming segment is discarded."
 
-    if (segment.header.flags.rst) {
+    if (segment.flags.rst) {
         // "An incoming segment containing a RST is discarded."
         return;
     } else {
         // "An incoming segment not containing a RST causes a RST to be sent in
         // response."
-        var rst = segmentRST(&segment.header);
+        var rst = segmentRST(&segment);
+
         rst.csum = rst.checksum(
             packet.header.saddr,
             packet.header.daddr,
             packet.header.proto,
             "",
         );
-        self.ip.send(
-            null,
-            packet.header.saddr,
-            .TCP,
-            std.mem.asBytes(&rst),
-        ) catch return;
+
+        self.ip.send(null, packet.header.saddr, .TCP, std.mem.asBytes(&rst)) catch return;
     }
 }
 
