@@ -35,14 +35,21 @@ pub fn init(allocator: std.mem.Allocator, tcp: *TCP) Self {
 }
 
 pub fn deinit(self: *Self) void {
-    var old = self.state();
     self.close();
+    self.mutex.lock();
+    defer self.mutex.unlock();
     if (self.conn) |conn| {
-        while (old != .CLOSED) {
-            // TODO: TIME_WAIT
-            std.debug.print("Looping on deinit: {}...\n", .{old});
-            old = conn.waitChange(old, -1) catch continue;
+        var s = conn.state;
+        while (s == .TIME_WAIT) {
+            std.debug.print("[Socket.deinit] state is TIME_WAIT. Waiting for {d} ns \n", .{Connection.default_msl});
+            s = conn.waitChange(s, Connection.default_msl) catch .CLOSED;
         }
+
+        while (s != .CLOSED) {
+            std.debug.print("State: {}\n", .{s});
+            s = conn.waitChange(s, -1) catch conn.state;
+        }
+
         conn.deinit();
         self.allocator.destroy(conn);
         self.conn = null;
@@ -60,8 +67,10 @@ pub fn close(self: *Self) void {
             // otherwise queue for processing after entering ESTABLISHED state.
             if (self.conn) |conn| {
                 if (self.tcp.sendqueue.countPending(conn.id) >= 0) {
-                    _ = conn.waitChange(.SYN_RECEIVED, -1) catch {};
+                    while (conn.waitChange(.SYN_RECEIVED, -1) catch conn.state != .ESTABLISHED) {}
+                    // wait until all our segments have been sent
                 }
+
                 conn.transmit(
                     null,
                     .{ .fin = true, .ack = true },
@@ -90,6 +99,7 @@ pub fn close(self: *Self) void {
             // Queue this until all preceding SENDs have been segmentized, then
             // form a FIN segment and send it.  In any case, enter FIN-WAIT-1
             // state.
+
             self.conn.?.transmit(
                 null,
                 .{ .fin = true, .ack = true },

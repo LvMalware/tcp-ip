@@ -84,11 +84,8 @@ pub fn main() !void {
     var ip = IPv4.init(allocator, &arp, &eth);
     defer ip.deinit();
 
-    var tcp = TCP.init(allocator, &ip, 500);
+    var tcp = try TCP.init(allocator, &ip, 500);
     defer tcp.deinit();
-
-    // start retransmission
-    try tcp.start();
 
     var icmp = ICMP4.init(allocator, &ip);
     defer icmp.deinit();
@@ -114,5 +111,5 @@ pub fn main() !void {
         }
         break :findMode false;
     };
-    if (client) clientLoop(allocator, &tcp) else serverLoop(allocator, &tcp);
+    if (client) clientLoop(allocator, tcp) else serverLoop(allocator, tcp);
 }

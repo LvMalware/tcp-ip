@@ -3,6 +3,9 @@ const Connection = @import("conn.zig");
 
 const Self = @This();
 
+// maximum segment lifetime
+pub const msl = 2 * std.time.ns_per_min;
+
 pub const Item = struct {
     conn: Connection.Id,
     segend: u32,
@@ -83,6 +86,12 @@ pub fn dequeue(self: *Self) ?Item {
         self.mutex.lock();
         defer self.mutex.unlock();
         var next = self.queue.removeOrNull() orelse continue;
+        if (next.rtcount * self.rto >= msl) {
+            // if a segment has reached it's MSL (Maximum Segment Lifetime), here defined as 2 minutes, it will be
+            // discarded
+            self.allocator.free(next.segment);
+            continue;
+        }
         next.rtcount += 1;
         next.timeout = self.timer.read() + next.rtcount * self.rto;
         self.queue.add(next) catch {};

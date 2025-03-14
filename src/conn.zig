@@ -12,7 +12,7 @@ const Option = @import("options.zig").Option;
 const Self = @This();
 
 // maximum segment lifetime
-pub const default_msl = 2 * std.time.ns_per_m;
+pub const default_msl = 2 * std.time.ns_per_min;
 // maximum segment size
 pub const default_mss = 1460;
 // receive window size
@@ -111,7 +111,7 @@ pub fn deinit(self: *Self) void {
     self.changed.signal();
 }
 
-pub fn getMSS(self: *Self) u16 {
+pub fn getMSS(self: Self) u16 {
     return self.context.mss - @sizeOf(TCP.Header);
 }
 
@@ -169,7 +169,7 @@ pub fn transmit(self: *Self, ack: ?u32, flags: TCP.Flags, data: []const u8) !voi
     }
 
     if ((header.flags.syn or header.flags.fin) and dataLen == 0) {
-        // after transmiting SYN (or SYN-ACK), we increment SND.NXT by 1
+        // after transmiting a FIN or a SYN, we increment snd.nxt by 1
         self.context.sendNext = @addWithOverflow(self.context.sendNext, 1)[0];
     } else {
         // only increment snd.nxt by the amount of data sent
@@ -177,6 +177,7 @@ pub fn transmit(self: *Self, ack: ?u32, flags: TCP.Flags, data: []const u8) !voi
     }
 
     if (flags.fin) {
+        // TODO: make sure this packet is only delivered after all other packets on the sendqueue
         switch (self.state) {
             .CLOSE_WAIT => {
                 self.state = .LAST_ACK;
@@ -280,10 +281,6 @@ pub fn acknowledge(self: *Self, seg: *const TCP.Segment) void {
     self.transmit(@truncate(seq), .{ .ack = true }, "") catch {};
 }
 
-pub fn reset(self: *Self, segment: *const TCP.Segment, accepted: bool) void {
-    self.transmit(segment.seq + 1, .{ .rst = true, .ack = accepted }, "") catch {};
-}
-
 fn processSegmentText(self: *Self, segment: *const TCP.Segment) void {
     if (segment.data.len > 0) {
         self.received.insert(segment.seq, segment.data, segment.flags.psh or segment.flags.fin) catch return;
@@ -318,7 +315,7 @@ pub fn handleSegment(self: *Self, ip: *const IPv4.Header, segment: *const TCP.Se
                 return;
 
             if (segment.flags.ack) {
-                self.reset(segment, true);
+                self.transmit(segment.seq + 1, .{ .rst = true, .ack = true }, "") catch {};
             } else if (segment.flags.syn) {
                 // TODO: check security and precedence
 
@@ -401,7 +398,7 @@ pub fn handleSegment(self: *Self, ip: *const IPv4.Header, segment: *const TCP.Se
                 self.state = .ESTABLISHED;
                 self.changed.signal();
             } else {
-                self.reset(segment, false);
+                self.transmit(segment.seq + 1, .{ .rst = true }, "") catch {};
                 return;
             }
             self.context.sendWinSeq = segment.seq;
@@ -418,16 +415,16 @@ pub fn handleSegment(self: *Self, ip: *const IPv4.Header, segment: *const TCP.Se
             }
         },
         .TIME_WAIT => {
+            std.debug.print("Here I am, TIME_WAIT\n", .{});
             if (segment.flags.fin) {
                 // TODO: restart 2 MSL timeout
+                self.changed.signal();
             }
         },
         .FIN_WAIT1 => {
             // a FIN without ACK is theoretically possible, but in this
             // implementation it is considered invalid and will be ignored
             if (!segment.flags.ack) return;
-
-            self.processSegmentText(segment);
 
             if (segment.flags.fin) {
                 // Both sides are trying to close simultaneously
@@ -437,15 +434,17 @@ pub fn handleSegment(self: *Self, ip: *const IPv4.Header, segment: *const TCP.Se
                 return;
             }
 
+            self.processSegmentText(segment);
+
             if (ack >= self.context.sendNext) {
                 self.state = .FIN_WAIT2;
                 self.changed.signal();
+                return;
             }
         },
         .FIN_WAIT2 => {
+            std.debug.print("Here I am \n", .{});
             if (!segment.flags.ack) return;
-
-            self.processSegmentText(segment);
 
             // "if the retransmission queue is empty, the user's CLOSE can
             // be acknowledged ("ok") but do not delete the TCB."
@@ -464,6 +463,8 @@ pub fn handleSegment(self: *Self, ip: *const IPv4.Header, segment: *const TCP.Se
                 self.changed.signal();
                 return;
             }
+
+            self.processSegmentText(segment);
         },
         .CLOSE_WAIT, .ESTABLISHED => {
             if (!segment.flags.ack) return;

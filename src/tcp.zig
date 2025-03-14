@@ -181,22 +181,28 @@ allocator: std.mem.Allocator,
 transmission: ?std.Thread,
 listenning: std.AutoHashMap(ConnKey, *Connection),
 connections: std.AutoHashMap(ConnKey, *Connection),
-pub fn init(allocator: std.mem.Allocator, ip: *IPv4, rto: usize) Self {
-    return .{
+
+pub fn init(allocator: std.mem.Allocator, ip: *IPv4, rto: usize) !*Self {
+    const tcp = try allocator.create(Self);
+    tcp.* = .{
         .ip = ip,
         .rto = rto * std.time.ns_per_ms,
         .mutex = .{},
-        .sendqueue = undefined,
+        .sendqueue = try SendQueue.init(allocator, rto * std.time.ns_per_ms),
         .allocator = allocator,
         .listenning = std.AutoHashMap(ConnKey, *Connection).init(allocator),
         .connections = std.AutoHashMap(ConnKey, *Connection).init(allocator),
         .transmission = null,
     };
+
+    tcp.transmission = try std.Thread.spawn(.{}, transmissionLoop, .{tcp});
+    return tcp;
 }
 
 pub fn deinit(self: *Self) void {
     self.mutex.lock();
     defer self.mutex.unlock();
+    defer self.allocator.destroy(self);
 
     self.sendqueue.deinit();
 
@@ -219,13 +225,6 @@ fn transmissionLoop(self: *Self) void {
         // }
         self.ip.send(null, item.conn.saddr, .TCP, item.segment) catch continue;
     }
-}
-
-pub fn start(self: *Self) !void {
-    self.mutex.lock();
-    defer self.mutex.unlock();
-    self.sendqueue = try SendQueue.init(self.allocator, self.rto);
-    self.transmission = try std.Thread.spawn(.{}, transmissionLoop, .{self});
 }
 
 pub fn addConnection(self: *Self, conn: *Connection) !void {
