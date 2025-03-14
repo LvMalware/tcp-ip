@@ -44,6 +44,7 @@ fn clientLoop(allocator: std.mem.Allocator, tcp: *TCP) void {
         std.debug.print("Failed to connect: {s}\n", .{@errorName(err)});
         return;
     };
+
     std.debug.print("Connected!\n", .{});
     while (client.state() == .ESTABLISHED) {
         const size = client.read(buffer[0..]) catch return;
@@ -51,6 +52,7 @@ fn clientLoop(allocator: std.mem.Allocator, tcp: *TCP) void {
         std.debug.print("[Client] Received: {s}\n", .{buffer[0..size]});
         _ = client.write(buffer[0..size]) catch return;
     }
+
     std.debug.print("Disconnected!\n", .{});
 }
 
@@ -82,7 +84,7 @@ pub fn main() !void {
     var ip = IPv4.init(allocator, &arp, &eth);
     defer ip.deinit();
 
-    var tcp = TCP.init(allocator, &ip, 400);
+    var tcp = TCP.init(allocator, &ip, 500);
     defer tcp.deinit();
 
     // start retransmission

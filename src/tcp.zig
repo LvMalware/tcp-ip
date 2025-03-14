@@ -176,8 +176,6 @@ pub const Segment = struct {
 ip: *IPv4,
 rto: usize,
 mutex: std.Thread.Mutex,
-cansend: std.Thread.Condition,
-running: std.atomic.Value(bool),
 sendqueue: SendQueue,
 allocator: std.mem.Allocator,
 transmission: ?std.Thread,
@@ -188,21 +186,22 @@ pub fn init(allocator: std.mem.Allocator, ip: *IPv4, rto: usize) Self {
         .ip = ip,
         .rto = rto * std.time.ns_per_ms,
         .mutex = .{},
-        .cansend = .{},
-        .running = std.atomic.Value(bool).init(false),
         .sendqueue = undefined,
         .allocator = allocator,
-        .transmission = null,
         .listenning = std.AutoHashMap(ConnKey, *Connection).init(allocator),
         .connections = std.AutoHashMap(ConnKey, *Connection).init(allocator),
+        .transmission = null,
     };
 }
 
 pub fn deinit(self: *Self) void {
-    self.stop();
     self.mutex.lock();
     defer self.mutex.unlock();
+
     self.sendqueue.deinit();
+
+    if (self.transmission) |*thread| thread.join();
+
     self.listenning.deinit();
     self.connections.deinit();
 }
@@ -225,33 +224,8 @@ fn transmissionLoop(self: *Self) void {
 pub fn start(self: *Self) !void {
     self.mutex.lock();
     defer self.mutex.unlock();
-    self.running.store(true, .release);
     self.sendqueue = try SendQueue.init(self.allocator, self.rto);
     self.transmission = try std.Thread.spawn(.{}, transmissionLoop, .{self});
-}
-
-pub fn stop(self: *Self) void {
-    self.mutex.lock();
-    defer self.mutex.unlock();
-    self.running.store(false, .release);
-    self.sendqueue.deinit();
-    if (self.transmission) |*thread| {
-        thread.join();
-    }
-}
-
-pub fn segmentRST(header: *const Segment) Header {
-    return std.mem.zeroInit(Header, .{
-        .seq = if (header.flags.ack) header.ack else 0,
-        .ack = std.mem.nativeToBig(u32, header.seq + 1),
-        .sport = header.dport,
-        .dport = header.sport,
-        .flags = .{
-            .ack = true,
-            .rst = true,
-            .doff = @as(u4, @truncate(@sizeOf(Header) / 4)),
-        },
-    });
 }
 
 pub fn addConnection(self: *Self, conn: *Connection) !void {
@@ -327,7 +301,17 @@ pub fn handle(self: *Self, packet: *const IPv4.Packet) void {
     } else {
         // "An incoming segment not containing a RST causes a RST to be sent in
         // response."
-        var rst = segmentRST(&segment);
+
+        var rst = std.mem.zeroInit(Header, .{
+            .seq = if (segment.flags.ack) segment.ack else 0,
+            .ack = std.mem.nativeToBig(u32, segment.seq + 1),
+            .sport = segment.dport,
+            .dport = segment.sport,
+            .flags = .{
+                .ack = true,
+                .rst = true,
+            },
+        });
 
         rst.csum = rst.checksum(
             packet.header.saddr,

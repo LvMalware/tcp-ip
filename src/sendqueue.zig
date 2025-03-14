@@ -121,6 +121,7 @@ pub fn removeAll(self: *Self, id: Connection.Id) void {
     }
 }
 
+// TODO: change sendqueue to make unecessary counting the pending segments
 pub fn countPending(self: *Self, id: Connection.Id) usize {
     self.mutex.lock();
     defer self.mutex.unlock();
