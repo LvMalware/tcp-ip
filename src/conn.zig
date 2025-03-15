@@ -69,10 +69,12 @@ tcp: *TCP,
 sock: *Socket,
 mutex: std.Thread.Mutex,
 state: State = .CLOSED,
+empty: std.Thread.Condition,
 backlog: usize,
 changed: std.Thread.Condition,
 context: Context,
-pending: std.DoublyLinkedList(Incoming),
+pending: u32 = 0,
+accepts: std.DoublyLinkedList(Incoming),
 received: Sorted,
 allocator: std.mem.Allocator,
 
@@ -84,9 +86,11 @@ pub fn init(self: *Self, allocator: std.mem.Allocator, sock: *Socket) void {
         .tcp = sock.tcp,
         .sock = sock,
         .mutex = .{},
+        .empty = .{},
         .backlog = 128,
         .changed = .{},
-        .pending = .{},
+        .accepts = .{},
+        .pending = 0,
         .context = .{
             .iss = iss,
             .sendNext = iss,
@@ -103,7 +107,7 @@ pub fn deinit(self: *Self) void {
     self.received.deinit();
     self.tcp.removeConnection(self);
     self.tcp.sendqueue.removeAll(self.id);
-    while (self.pending.pop()) |node| {
+    while (self.accepts.pop()) |node| {
         self.allocator.free(node.data.options);
         self.allocator.destroy(node);
     }
@@ -128,6 +132,13 @@ pub fn waitChange(self: *Self, state: State, timeout: isize) !State {
     if (self.state != state) return self.state;
     try self.changed.timedWait(&self.mutex, @bitCast(timeout));
     return self.state;
+}
+
+pub fn waitSendAll(self: *Self, timeout: isize) !void {
+    self.mutex.lock();
+    defer self.mutex.unlock();
+    if (self.pending > 0)
+        try self.empty.timedWait(&self.mutex, @bitCast(timeout));
 }
 
 pub fn transmit(self: *Self, ack: ?u32, flags: TCP.Flags, data: []const u8) !void {
@@ -177,7 +188,6 @@ pub fn transmit(self: *Self, ack: ?u32, flags: TCP.Flags, data: []const u8) !voi
     }
 
     if (flags.fin) {
-        // TODO: make sure this packet is only delivered after all other packets on the sendqueue
         switch (self.state) {
             .CLOSE_WAIT => {
                 self.state = .LAST_ACK;
@@ -197,23 +207,24 @@ pub fn transmit(self: *Self, ack: ?u32, flags: TCP.Flags, data: []const u8) !voi
             self.id,
             self.context.sendNext,
         );
+        self.pending += 1;
     } else {
         try self.tcp.ip.send(null, self.id.saddr, .TCP, buffer);
     }
 }
 
-pub fn nextPending(self: *Self) ?Incoming {
+pub fn nextAccept(self: *Self) ?Incoming {
     self.mutex.lock();
     defer self.mutex.unlock();
-    if (self.pending.popFirst()) |node| {
+    if (self.accepts.popFirst()) |node| {
         defer self.allocator.destroy(node);
         return node.data;
     }
     return null;
 }
 
-fn addPending(self: *Self, ip: *const IPv4.Header, seg: *const TCP.Segment) !void {
-    var next = self.pending.first;
+fn addAccept(self: *Self, ip: *const IPv4.Header, seg: *const TCP.Segment) !void {
+    var next = self.accepts.first;
     while (next != null) : (next = next.?.next) {
         if (ip.saddr == next.?.data.id.saddr and seg.sport == next.?.data.id.sport)
             return;
@@ -235,13 +246,9 @@ fn addPending(self: *Self, ip: *const IPv4.Header, seg: *const TCP.Segment) !voi
         },
     };
 
-    self.pending.append(node);
+    self.accepts.append(node);
 
-    self.sock.mutex.lock();
-    defer self.sock.mutex.unlock();
-
-    self.sock.events.read += 1;
-    self.sock.canread.signal();
+    self.sock.read_event.post();
 }
 
 pub fn setPassive(self: *Self, addr: u32, port: u16, backlog: usize) !void {
@@ -289,10 +296,7 @@ fn processSegmentText(self: *Self, segment: *const TCP.Segment) void {
     }
 
     if (segment.flags.psh or segment.flags.fin) {
-        self.sock.mutex.lock();
-        defer self.sock.mutex.unlock();
-        self.sock.events.read += 1;
-        self.sock.canread.signal();
+        self.sock.read_event.post();
     }
 
     if (segment.flags.urg) {
@@ -319,7 +323,7 @@ pub fn handleSegment(self: *Self, ip: *const IPv4.Header, segment: *const TCP.Se
             } else if (segment.flags.syn) {
                 // TODO: check security and precedence
 
-                self.addPending(ip, segment) catch {};
+                self.addAccept(ip, segment) catch {};
             }
             return;
         },
@@ -377,7 +381,8 @@ pub fn handleSegment(self: *Self, ip: *const IPv4.Header, segment: *const TCP.Se
     const ack = if (segment.flags.ack) segment.ack else self.context.iss;
 
     if (segment.flags.ack) {
-        self.tcp.sendqueue.ack(self.id, ack);
+        self.pending -= self.tcp.sendqueue.ack(self.id, ack);
+        if (self.pending == 0) self.empty.signal();
         if (ack > self.context.sendUnack and ack < self.context.sendNext)
             self.context.sendUnack = ack;
     }
@@ -415,7 +420,6 @@ pub fn handleSegment(self: *Self, ip: *const IPv4.Header, segment: *const TCP.Se
             }
         },
         .TIME_WAIT => {
-            std.debug.print("Here I am, TIME_WAIT\n", .{});
             if (segment.flags.fin) {
                 // TODO: restart 2 MSL timeout
                 self.changed.signal();
@@ -428,9 +432,9 @@ pub fn handleSegment(self: *Self, ip: *const IPv4.Header, segment: *const TCP.Se
 
             if (segment.flags.fin) {
                 // Both sides are trying to close simultaneously
-                self.acknowledge(segment);
                 self.state = if (ack >= self.context.sendNext) .TIME_WAIT else .CLOSING;
                 self.changed.signal();
+                self.acknowledge(segment);
                 return;
             }
 
@@ -443,7 +447,6 @@ pub fn handleSegment(self: *Self, ip: *const IPv4.Header, segment: *const TCP.Se
             }
         },
         .FIN_WAIT2 => {
-            std.debug.print("Here I am \n", .{});
             if (!segment.flags.ack) return;
 
             // "if the retransmission queue is empty, the user's CLOSE can
@@ -454,13 +457,6 @@ pub fn handleSegment(self: *Self, ip: *const IPv4.Header, segment: *const TCP.Se
                 self.state = .TIME_WAIT;
                 self.changed.signal();
                 self.acknowledge(segment);
-                return;
-            }
-
-            if (ack >= self.context.sendNext and self.tcp.sendqueue.countPending(self.id) == 0) {
-                // TODO: start 2 MSL timeout
-                self.state = .TIME_WAIT;
-                self.changed.signal();
                 return;
             }
 

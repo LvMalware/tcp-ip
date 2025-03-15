@@ -100,19 +100,22 @@ pub fn dequeue(self: *Self) ?Item {
     return null;
 }
 
-pub fn ack(self: *Self, id: Connection.Id, seq: u32) void {
+pub fn ack(self: *Self, id: Connection.Id, seq: u32) u32 {
     self.mutex.lock();
     defer self.mutex.unlock();
 
+    var count: u32 = 0;
     var index: usize = 0;
     while (index < self.queue.count()) {
         if (self.queue.items[index].conn.eql(id) and self.queue.items[index].segend <= seq) {
             const item = self.queue.removeIndex(index);
             self.allocator.free(item.segment);
+            count += 1;
             continue;
         }
         index += 1;
     }
+    return count;
 }
 
 pub fn removeAll(self: *Self, id: Connection.Id) void {
@@ -128,18 +131,4 @@ pub fn removeAll(self: *Self, id: Connection.Id) void {
         }
         index += 1;
     }
-}
-
-// TODO: change sendqueue to make unecessary counting the pending segments
-pub fn countPending(self: *Self, id: Connection.Id) usize {
-    self.mutex.lock();
-    defer self.mutex.unlock();
-    var count: usize = 0;
-
-    var iter = self.queue.iterator();
-    while (iter.next()) |item| {
-        if (item.conn.eql(id)) count += 1;
-    }
-
-    return count;
 }

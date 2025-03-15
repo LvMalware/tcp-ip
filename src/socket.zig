@@ -18,9 +18,9 @@ addr: u32,
 port: u16,
 conn: ?*Connection,
 mutex: std.Thread.Mutex,
-events: Events,
-canread: std.Thread.Condition,
 allocator: std.mem.Allocator,
+read_event: std.Thread.Semaphore,
+// write_event: std.Thread.Semphore,
 pub fn init(allocator: std.mem.Allocator, tcp: *TCP) Self {
     return .{
         .tcp = tcp,
@@ -28,9 +28,8 @@ pub fn init(allocator: std.mem.Allocator, tcp: *TCP) Self {
         .port = 0,
         .conn = null,
         .mutex = .{},
-        .events = .{},
-        .canread = .{},
         .allocator = allocator,
+        .read_event = .{},
     };
 }
 
@@ -40,14 +39,13 @@ pub fn deinit(self: *Self) void {
     defer self.mutex.unlock();
     if (self.conn) |conn| {
         var s = conn.state;
-        while (s == .TIME_WAIT) {
-            std.debug.print("[Socket.deinit] state is TIME_WAIT. Waiting for {d} ns \n", .{Connection.default_msl});
-            s = conn.waitChange(s, Connection.default_msl) catch .CLOSED;
-        }
 
         while (s != .CLOSED) {
-            std.debug.print("State: {}\n", .{s});
-            s = conn.waitChange(s, -1) catch conn.state;
+            if (s == .TIME_WAIT) {
+                s = conn.waitChange(s, Connection.default_msl) catch .CLOSED;
+            } else {
+                s = conn.waitChange(s, -1) catch conn.state;
+            }
         }
 
         conn.deinit();
@@ -66,10 +64,7 @@ pub fn close(self: *Self) void {
             // then form a FIN segment and send it, and enter FIN-WAIT-1 state;
             // otherwise queue for processing after entering ESTABLISHED state.
             if (self.conn) |conn| {
-                if (self.tcp.sendqueue.countPending(conn.id) >= 0) {
-                    while (conn.waitChange(.SYN_RECEIVED, -1) catch conn.state != .ESTABLISHED) {}
-                    // wait until all our segments have been sent
-                }
+                while (conn.pending > 0) conn.waitSendAll(-1) catch {};
 
                 conn.transmit(
                     null,
@@ -100,6 +95,7 @@ pub fn close(self: *Self) void {
             // form a FIN segment and send it.  In any case, enter FIN-WAIT-1
             // state.
 
+            while (self.conn.?.pending > 0) self.conn.?.waitSendAll(-1) catch {};
             self.conn.?.transmit(
                 null,
                 .{ .fin = true, .ack = true },
@@ -110,6 +106,7 @@ pub fn close(self: *Self) void {
         .CLOSE_WAIT => {
             // Queue this request until all preceding SENDs have been
             // segmentized; then send a FIN segment, enter CLOSING state.
+            while (self.conn.?.pending > 0) self.conn.?.waitSendAll(-1) catch {};
             self.conn.?.transmit(
                 null,
                 .{ .fin = true, .ack = true },
@@ -178,12 +175,9 @@ pub fn accept(self: *Self) !*Self {
     defer self.mutex.unlock();
     if (self.state() != .LISTEN) return error.NotListenning;
 
-    while (self.events.read == 0) {
-        self.canread.wait(&self.mutex);
-    }
+    self.read_event.wait();
 
-    if (self.conn.?.nextPending()) |pending| {
-        defer self.events.read -= 1;
+    if (self.conn.?.nextAccept()) |pending| {
         var client = try self.allocator.create(Self);
         client.* = Self.init(self.allocator, self.tcp);
         errdefer {
@@ -240,7 +234,6 @@ pub fn connect(self: *Self, host: []const u8, port: u16) !void {
         );
 
         if (try conn.waitChange(.SYN_SENT, 30 * std.time.ns_per_s) == .CLOSED) {
-            // std.debug.print("Closed\n", .{});
             return error.ConnectionRefused;
         }
     }
