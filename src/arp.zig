@@ -261,9 +261,11 @@ pub fn handle(self: *Self, frame: *const Ethernet.Frame) void {
                     std.mem.copyForwards(u8, entry.smac[0..], ipv4.smac[0..]);
                     entry.state = .resolved;
                     entry.resolved.signal();
+                    break;
                 }
             }
         },
-        .rarp_request, .rarp_reply => {},
+        .rarp_request => {},
+        .rarp_reply => {},
     }
 }

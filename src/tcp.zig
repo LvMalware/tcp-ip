@@ -75,13 +75,7 @@ pub const Header = extern struct {
         return std.mem.bytesToValue(Header, bytes[0..@sizeOf(Header)]);
     }
 
-    pub fn checksum(
-        self: Header,
-        saddr: u32,
-        daddr: u32,
-        proto: u8,
-        data: []const u8,
-    ) u16 {
+    pub fn checksum(self: Header, saddr: u32, daddr: u32, proto: u8, data: []const u8) u16 {
         var csum: u32 = 0;
         csum += saddr;
         csum += daddr;
@@ -200,9 +194,9 @@ pub fn init(allocator: std.mem.Allocator, ip: *IPv4, rto: usize) !*Self {
 }
 
 pub fn deinit(self: *Self) void {
+    defer self.allocator.destroy(self); // ---> defer first, executes last
     self.mutex.lock();
-    defer self.mutex.unlock();
-    defer self.allocator.destroy(self);
+    defer self.mutex.unlock(); //          ---> defer last, executes first
 
     self.sendqueue.deinit();
 
@@ -245,6 +239,7 @@ pub fn removeConnection(self: *Self, conn: *Connection) void {
     defer self.mutex.unlock();
     _ = switch (conn.state) {
         .LISTEN => self.listenning.remove(conn.id),
+        // .TIME_WAIT => wait 2*MSL before removing
         else => self.connections.remove(conn.id),
     };
 }

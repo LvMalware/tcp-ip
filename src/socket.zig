@@ -42,6 +42,7 @@ pub fn deinit(self: *Self) void {
 
         while (s != .CLOSED) {
             if (s == .TIME_WAIT) {
+                std.debug.print("[Socket] deinit(): waiting MSL ({d} ns)\n", .{Connection.default_msl});
                 s = conn.waitChange(s, Connection.default_msl) catch .CLOSED;
             } else {
                 s = conn.waitChange(s, -1) catch conn.state;

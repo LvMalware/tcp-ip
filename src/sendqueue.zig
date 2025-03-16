@@ -90,6 +90,8 @@ pub fn dequeue(self: *Self) ?Item {
             // if a segment has reached it's MSL (Maximum Segment Lifetime), here defined as 2 minutes, it will be
             // discarded
             self.allocator.free(next.segment);
+            // TODO: signal to the connection that a TIMEOUT error has ocurred
+            std.debug.print("[TCP] Timeout for sending segment {d}\n", .{next.segend});
             continue;
         }
         next.rtcount += 1;

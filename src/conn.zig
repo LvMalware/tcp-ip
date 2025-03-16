@@ -36,8 +36,8 @@ const Context = struct {
     sendNext: u32 = 0, // sequence id of next segment to be sent
     recvNext: u32 = 0, // sequence id of next segment to be received
     sendUnack: u32 = 0, // oldest unacknowledged segment
-    sendUrgent: u16 = 0, // sent urgent data pointer
-    recvUrgent: u16 = 0, // received urgent data pointer
+    sendUrgent: u32 = 0, // sent urgent data pointer
+    recvUrgent: u32 = 0, // received urgent data pointer
     sendWinSeq: u32 = 0, // sequence id of last window update segment
     sendWinAck: u32 = 0, // ack id of last window update segment
     sendWindow: u16 = 0, // remote host's recvWindow
@@ -64,8 +64,14 @@ pub const State = enum(u8) {
     SYN_RECEIVED,
 };
 
+pub const Mode = enum(u8) {
+    NORMAL,
+    URGENT,
+};
+
 id: Id,
 tcp: *TCP,
+mode: Mode = .NORMAL,
 sock: *Socket,
 mutex: std.Thread.Mutex,
 state: State = .CLOSED,
@@ -300,11 +306,18 @@ fn processSegmentText(self: *Self, segment: *const TCP.Segment) void {
     }
 
     if (segment.flags.urg) {
-        const urg = bigToNative(u16, segment.urgent);
+        const urg = @addWithOverflow(segment.seq, bigToNative(u16, segment.urgent))[0];
         if (urg > self.context.recvUrgent) {
             self.context.recvUrgent = urg;
+            if (self.mode != .URGENT) {
+                std.debug.print("[TCB] Going into URGENT mode until {d}\n", .{urg});
+            }
+
+            self.mode = .URGENT;
+            // signal user
         }
-        // TODO: if (self.context.recvUrgent > data consumed ...
+    } else {
+        self.mode = .NORMAL;
     }
 }
 

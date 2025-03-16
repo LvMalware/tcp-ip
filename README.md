@@ -1,24 +1,23 @@
 # TCP/IP
 
-> This is a user-land implementation of the TCP/IP protocol using the Linux TAP interface
+## What is this?
 
+This is a user-land implementation of the TCP/IP protocol using the Linux TAP interface. The goal was to have a deeper understanding about TCP/IP and other network protocols by implementing them myself. It also seemed like an interesting project to exercise Zig programming. I started by following [this](https://www.saminiir.com/lets-code-tcp-ip-stack-1-ethernet-arp/) guide and then filled the missing parts by reading the related RFCs.
 
-## TODOs/Ideas
+## Implemented
 
-<!-- - Have a single outgoing queue that handles both normal transmissions and retransmissions, so we eliminate an additional thread
-    - Each segment would have a RTO with new segments have RTO = 0, while retransmitted segments would have a non-zero RTO (increasing with each retransmission).
-    - Insertions should be sorted by RTO (insertion sort should not be so computationally expensive...) -->
+Basics of:
+- Ethernet
+- IP functionality
+- ARP request/response
+- TCP functionality (connection, retransmission, etc.)
 
-- Review the whole implementation to fix mistakes of RFC 793 by following RFC 1122 and later erratas
+## Missing/TODO
 
 - Handle Urgent data on the TCP
 
 - Implement IP options and fragmentation
 
-- Add an empty queue signal
-    - Each connection can be signaled that all the segments were sent (and ACKed), so it can close
-
-- Optimize transmission queue
-    - maybe have some form of poll on multiple connections to efficiently select the connection and segment to transmit instead of using a loop on the queue
-
 - Implement timeouts
+
+- Many more
