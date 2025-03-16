@@ -151,18 +151,17 @@ fn _accepted(self: *Self, pending: *const Connection.Incoming) !void {
             return err;
         };
 
-        const opt = Options.MSSOption{
-            .data = conn.context.mss,
+        const mss: Options.Option = .{
+            .MSS = Options.MSSOption{
+                .data = conn.context.mss,
+            },
         };
-        const mss = try self.allocator.alloc(u8, opt.size());
-        defer self.allocator.free(mss);
-        opt.toBytes(mss[0..]);
-        const doff = mss.len + @sizeOf(TCP.Header);
 
-        try conn.transmit(
+        try conn.transmitWithOptions(
             conn.context.recvNext,
-            .{ .doff = @truncate(doff / 4), .ack = true, .syn = true },
-            mss,
+            .{ .ack = true, .syn = true },
+            &[_]Options.Option{mss},
+            "",
         );
 
         // wait for ACK to establish connection
@@ -219,22 +218,20 @@ pub fn connect(self: *Self, host: []const u8, port: u16) !void {
             return err;
         };
 
-        const opt = Options.MSSOption{
-            .data = conn.context.mss,
+        const mss: Options.Option = .{
+            .MSS = Options.MSSOption{
+                .data = conn.context.mss,
+            },
         };
-        const mss = try self.allocator.alloc(u8, opt.size());
-        defer self.allocator.free(mss);
-        const doff = mss.len + @sizeOf(TCP.Header);
 
-        opt.toBytes(mss[0..]);
-
-        try conn.transmit(
-            null,
-            .{ .doff = @truncate(doff / 4), .syn = true },
-            mss,
+        try conn.transmitWithOptions(
+            conn.context.recvNext,
+            .{ .syn = true },
+            &[_]Options.Option{mss},
+            "",
         );
 
-        if (try conn.waitChange(.SYN_SENT, 30 * std.time.ns_per_s) == .CLOSED) {
+        if (try conn.waitChange(.SYN_SENT, Connection.default_msl) == .CLOSED) {
             return error.ConnectionRefused;
         }
     }

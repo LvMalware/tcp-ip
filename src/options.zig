@@ -8,6 +8,7 @@ pub const Kind = enum(u8) {
     WINDOW_SCALE = 3,
     SACK_PERMITTED = 4, // selective acknowledgement (RFC 2018)
     SACK = 5,
+    TIMESTAMP = 8,
     pub fn fromInt(val: u8) !Kind {
         return std.meta.intToEnum(Kind, val) catch {
             std.debug.print("[OPTIONS] Unknown option kind: {d}\n", .{val});
@@ -101,6 +102,26 @@ pub const SACKOption = struct {
     }
 };
 
+const TimestampOption = struct {
+    tsval: u32,
+    tsecr: u32,
+    pub fn size(self: TimestampOption) usize {
+        _ = .{self};
+        return 10;
+    }
+
+    pub fn fromBytes(data: []const u8) TimestampOption {
+        return .{
+            .tsval = std.mem.readInt(u32, data[2..6], .big),
+            .tsecr = std.mem.readInt(u32, data[6..10], .big),
+        };
+    }
+
+    pub fn toBytes(self: TimestampOption, bytes: []u8) void {
+        _ = .{ self, bytes };
+    }
+};
+
 pub const WindowScaleOption = struct {
     data: u8, // shift count
     pub fn size(self: WindowScaleOption) usize {
@@ -121,6 +142,7 @@ pub const Option = union(Kind) {
     WINDOW_SCALE: WindowScaleOption,
     SACK_PERMITTED: SACKPermittedOption,
     SACK: SACKOption,
+    TIMESTAMP: TimestampOption,
 
     pub fn fromBytes(bytes: []const u8) !Option {
         const kind = try Kind.fromInt(bytes[0]);
@@ -133,6 +155,7 @@ pub const Option = union(Kind) {
             .WINDOW_SCALE => .{ .WINDOW_SCALE = .{ .data = bytes[2] } },
             .SACK => .{ .SACK = SACKOption.fromBytes(bytes) },
             .SACK_PERMITTED => .{ .SACK_PERMITTED = .{} },
+            .TIMESTAMP => .{ .TIMESTAMP = TimestampOption.fromBytes(bytes) },
         };
     }
 

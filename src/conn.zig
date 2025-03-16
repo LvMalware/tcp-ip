@@ -147,6 +147,23 @@ pub fn waitSendAll(self: *Self, timeout: isize) !void {
         try self.empty.timedWait(&self.mutex, @bitCast(timeout));
 }
 
+pub fn transmitWithOptions(self: *Self, ack: ?u32, flags: TCP.Flags, options: []const Option, data: []const u8) !void {
+    var buf = std.ArrayList(u8).init(self.allocator);
+    defer buf.deinit();
+
+    for (options) |opt| {
+        opt.toBytes(try buf.addManyAsSlice(opt.size()));
+    }
+
+    std.debug.assert(buf.items.len <= 40);
+
+    var modflags = flags;
+    modflags.doff = @truncate((@sizeOf(TCP.Header) + buf.items.len) / 4);
+
+    try buf.appendSlice(data);
+    try self.transmit(ack, modflags, buf.items);
+}
+
 pub fn transmit(self: *Self, ack: ?u32, flags: TCP.Flags, data: []const u8) !void {
     const segLen = @sizeOf(TCP.Header) + data.len;
     if (segLen > self.context.mss or (self.context.sendWindow > 0 and segLen > self.usableWindow()))
