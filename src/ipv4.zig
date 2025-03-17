@@ -1,7 +1,7 @@
 const std = @import("std");
 const native_endian = @import("builtin").target.cpu.arch.endian();
 
-const Arp = @import("arp.zig");
+const ARP = @import("arp.zig");
 const Ethernet = @import("ethernet.zig");
 
 const Self = @This();
@@ -105,12 +105,12 @@ pub const vtable = Ethernet.Handler.VTable{
     .handle = vhandle,
 };
 
-arp: *Arp,
+arp: *ARP,
 ethernet: *Ethernet,
 handlers: std.AutoHashMap(Proto, Handler),
 allocator: std.mem.Allocator,
 
-pub fn init(allocator: std.mem.Allocator, arp: *Arp, ethernet: *Ethernet) Self {
+pub fn init(allocator: std.mem.Allocator, arp: *ARP, ethernet: *Ethernet) Self {
     return .{
         .arp = arp,
         .ethernet = ethernet,

@@ -2,7 +2,7 @@ const std = @import("std");
 
 const Tap = @import("tap.zig");
 const TCP = @import("tcp.zig");
-const Arp = @import("arp.zig");
+const ARP = @import("arp.zig");
 const IPv4 = @import("ipv4.zig");
 const ICMP4 = @import("icmp4.zig");
 const Socket = @import("socket.zig");
@@ -71,14 +71,21 @@ pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const allocator = gpa.allocator();
 
-    var dev = try Tap.Device.init(allocator, null);
+    var dev = Tap.Device.init(allocator, null) catch |err| switch (err) {
+        error.IoCtl => {
+            std.debug.print("[ERROR] Cannot IOCTL on the Tap device.\n", .{});
+            std.debug.print("Try running this program as root or set cap_net_admin capability on the file\n", .{});
+            return err;
+        },
+        else => return err,
+    };
     defer dev.deinit();
     try dev.ifup("AA:AA:AA:AA:AA:AA", "10.0.0.4");
 
     var eth = Ethernet.init(allocator, &dev);
     defer eth.deinit();
 
-    var arp = Arp.init(allocator, &eth);
+    var arp = ARP.init(allocator, &eth);
     defer arp.deinit();
 
     var ip = IPv4.init(allocator, &arp, &eth);

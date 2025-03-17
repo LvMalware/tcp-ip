@@ -23,7 +23,7 @@ pub const EndOption = struct {
         return 1;
     }
     pub fn toBytes(self: EndOption, bytes: []u8) void {
-        _ = .{self};
+        std.debug.assert(bytes.len >= self.size());
         bytes[0] = @intFromEnum(Kind.END);
     }
 };
@@ -34,7 +34,7 @@ pub const NopOption = struct {
         return 1;
     }
     pub fn toBytes(self: NopOption, bytes: []u8) void {
-        _ = .{self};
+        std.debug.assert(bytes.len >= self.size());
         bytes[0] = @intFromEnum(Kind.NOP);
     }
 };
@@ -51,6 +51,7 @@ pub const MSSOption = struct {
         };
     }
     pub fn toBytes(self: MSSOption, bytes: []u8) void {
+        std.debug.assert(bytes.len >= self.size());
         bytes[0] = @intFromEnum(Kind.MSS);
         bytes[1] = @truncate(self.size());
         std.mem.writeInt(u16, bytes[2..][0..2], self.data, .big);
@@ -65,6 +66,7 @@ pub const SACKPermittedOption = struct {
     }
 
     pub fn toBytes(self: SACKPermittedOption, bytes: []u8) void {
+        std.debug.assert(bytes.len >= self.size());
         bytes[0] = @intFromEnum(Kind.SACK_PERMITTED);
         bytes[1] = @truncate(self.size());
     }
@@ -97,8 +99,17 @@ pub const SACKOption = struct {
         return opt;
     }
     pub fn toBytes(self: SACKOption, bytes: []u8) void {
-        _ = .{ self, bytes };
-        // TODO
+        std.debug.assert(bytes.len >= self.size());
+        bytes[0] = @intFromEnum(Kind.SACK);
+        bytes[1] = @truncate(self.size());
+        var index: usize = 2;
+        for (self.data) |edge| {
+            if (edge) |e| {
+                std.mem.writeInt(u32, bytes[index..][0..4], e.left, .big);
+                std.mem.writeInt(u32, bytes[index + 4 ..][0..4], e.right, .big);
+                index += @sizeOf(Edge);
+            }
+        }
     }
 };
 
@@ -118,7 +129,11 @@ const TimestampOption = struct {
     }
 
     pub fn toBytes(self: TimestampOption, bytes: []u8) void {
-        _ = .{ self, bytes };
+        std.debug.assert(bytes.len >= self.size());
+        bytes[0] = @intFromEnum(Kind.TIMESTAMP);
+        bytes[1] = @truncate(self.size());
+        std.mem.writeInt(u32, bytes[2..6], self.tsval, .big);
+        std.mem.writeInt(u32, bytes[6..10], self.tsecr, .big);
     }
 };
 
@@ -129,6 +144,7 @@ pub const WindowScaleOption = struct {
         return 3;
     }
     pub fn toBytes(self: WindowScaleOption, bytes: []u8) void {
+        std.debug.assert(bytes.len >= self.size());
         bytes[0] = @intFromEnum(Kind.WINDOW_SCALE);
         bytes[1] = @truncate(self.size());
         bytes[2] = self.data;
