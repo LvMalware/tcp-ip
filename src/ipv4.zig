@@ -16,8 +16,30 @@ pub const Proto = enum(u8) {
     }
 };
 
+pub const VerIHL = switch (native_endian) {
+    .big => packed struct {
+        ver: u4 = 4,
+        ihl: u4 = @truncate(@sizeOf(Header) / 4),
+    },
+    .little => packed struct {
+        ihl: u4 = @truncate(@sizeOf(Header) / 4),
+        ver: u4 = 4,
+    },
+};
+
+pub const Precedence = enum(u3) {
+    network_control = 0b111, //Network Control
+    internetwork_control = 0b110, //Internetwork Control
+    critic = 0b101, // CRITIC/ECP
+    flash_override = 0b100, //Flash Override
+    flash = 0b011, // Flash
+    immediate = 0b010, //Immediate
+    priority = 0b001, // Priority
+    routine = 0b000, // Routine
+};
+
 pub const Header = extern struct {
-    ver_ihl: u8 align(1),
+    ver_ihl: VerIHL align(1),
     tos: u8 align(1),
     len: u16 align(1),
     id: u16 align(1),
@@ -33,24 +55,11 @@ pub const Header = extern struct {
     }
 
     pub fn ihl(self: Header) u8 {
-        return switch (native_endian) {
-            .big => self.ver_ihl >> 4,
-            .little => self.ver_ihl & 0xf,
-        };
+        return self.ver_ihl.ihl;
     }
 
     pub fn version(self: Header) u8 {
-        return switch (native_endian) {
-            .little => self.ver_ihl >> 4,
-            .big => self.ver_ihl & 0xf,
-        };
-    }
-
-    pub fn setVersionIHL(self: *Header, ver: u8, hs: u8) void {
-        self.ver_ihl = switch (native_endian) {
-            .big => (hs << 4) | ver,
-            .little => (ver << 4) | hs,
-        };
+        return self.ver_ihl.ver;
     }
 
     pub fn checksum(self: Header) u16 {
@@ -76,6 +85,21 @@ pub const Header = extern struct {
     }
 };
 
+const Id = struct {
+    id: u16,
+    src: u32,
+    dst: u32,
+    proto: u8,
+    pub fn fromPacket(packet: Packet) Id {
+        return .{
+            .id = packet.header.id,
+            .src = packet.header.saddr,
+            .dst = packet.header.daddr,
+            .proto = packet.header.proto,
+        };
+    }
+};
+
 pub const Packet = struct {
     header: Header,
     data: []const u8,
@@ -87,6 +111,31 @@ pub const Packet = struct {
             .header = header,
             .data = header.data(bytes),
         };
+    }
+
+    pub fn dontFragment(self: Packet) bool {
+        return self.header.frag & switch (native_endian) {
+            .big => 0x4000,
+            .little => 0x0040,
+        } != 0;
+    }
+
+    pub fn moreFragments(self: Packet) bool {
+        return self.header.frag & switch (native_endian) {
+            .big => 0x2000,
+            .little => 0x0020,
+        } == 1;
+    }
+
+    pub fn fragmentOffset(self: Packet) u13 {
+        return switch (native_endian) {
+            .big => @truncate(self.header.frag),
+            .little => @truncate(std.mem.bigToNative(u16, self.header.frag)),
+        };
+    }
+
+    pub fn precedence(self: Packet) Precedence {
+        return @enumFromInt(self.header.tos >> 5);
     }
 };
 
@@ -109,6 +158,7 @@ arp: *ARP,
 ethernet: *Ethernet,
 handlers: std.AutoHashMap(Proto, Handler),
 allocator: std.mem.Allocator,
+reassemble: std.AutoHashMap(Id, []u8),
 
 pub fn init(allocator: std.mem.Allocator, arp: *ARP, ethernet: *Ethernet) Self {
     return .{
@@ -116,6 +166,7 @@ pub fn init(allocator: std.mem.Allocator, arp: *ARP, ethernet: *Ethernet) Self {
         .ethernet = ethernet,
         .handlers = std.AutoHashMap(Proto, Handler).init(allocator),
         .allocator = allocator,
+        .reassemble = std.AutoHashMap(Id, []u8).init(allocator),
     };
 }
 
@@ -130,6 +181,7 @@ fn vhandle(ctx: *anyopaque, frame: *const Ethernet.Frame) void {
 
 pub fn deinit(self: *Self) void {
     self.handlers.deinit();
+    self.reassemble.deinit();
 }
 
 pub fn addProtocolHandler(self: *Self, proto: Proto, h: Handler) !void {
@@ -147,10 +199,8 @@ pub fn send(self: *Self, src: ?u32, dst: u32, proto: Proto, data: []const u8) !v
         .saddr = 0,
         .daddr = 0,
         .proto = @intFromEnum(proto),
-        .ver_ihl = 0,
+        .ver_ihl = .{},
     };
-
-    header.setVersionIHL(4, @sizeOf(Header) / 4);
 
     if (native_endian != .big) {
         std.mem.byteSwapAllFields(Header, &header);
@@ -181,7 +231,28 @@ pub fn handle(self: *Self, frame: *const Ethernet.Frame) void {
     //     packet.header.daddr,
     // });
 
-    if (self.handlers.get(proto)) |*h| {
-        h.handle(&packet);
+    const proto_handler = self.handlers.get(proto) orelse return;
+
+    // TODO: combine packets with same identification, source, destination and protocol (fragmentation reassemble)
+    const id = Id.fromPacket(packet);
+    if (self.reassemble.get(id)) |data| {
+        const needed = packet.fragmentOffset() + packet.data.len;
+        if (needed > data.len) {
+            self.reassemble.putAssumeCapacity(id, self.allocator.realloc(data, needed) catch return);
+        }
+        const buffer = self.reassemble.get(id).?;
+        std.mem.copyForwards(u8, buffer[packet.fragmentOffset()..], packet.data);
+        if (!packet.moreFragments()) {
+            proto_handler.handle(&.{
+                .header = packet.header,
+                .data = buffer,
+            });
+            _ = self.reassemble.remove(id);
+            self.allocator.free(buffer);
+        }
+    } else if (packet.moreFragments()) {
+        self.reassemble.put(id, self.allocator.dupe(u8, packet.data) catch return) catch return;
+    } else {
+        proto_handler.handle(&packet);
     }
 }
